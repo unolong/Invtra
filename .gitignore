@@ -31,10 +31,15 @@ yarn-error.*
 *.pem
 
 # local env files
+.env
 .env*.local
 
 # typescript
 *.tsbuildinfo
+
+# BLS source files (only keep generated JSON)
+BLS_4_0_2025_DE/
+bls_download.zip
 
 app-example
 

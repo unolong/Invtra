@@ -1,74 +1,115 @@
-# FridgeAI – Projektkontext für Claude Code
+FridgeAI – Projektkontext für Claude Code
+Was ist die App?
+Eine KI-gestützte Makro-Tracking App für iOS und Android. Der Nutzer erfasst was er isst, die App zeigt wie weit er von seinen Tageszielen entfernt ist, schlägt Rezepte aus dem Inventar vor und führt ihn durch das Kochen.
+Primäre Zielgruppe: Fitness-affine Personen (18–30) die Makros tracken aber eine intelligentere Lösung als MyFitnessPal suchen.
 
-## Was ist FridgeAI?
+Tech Stack
 
-Eine Makro-Tracking App für iOS und Android. Der Nutzer erfasst was er isst, die App zeigt wie weit er von seinen Tageszielen entfernt ist, und schlägt Rezepte vor die seinen Kühlschrank-Inhalt mit den restlichen Makros kombinieren.
+React Native mit Expo (Managed Workflow)
+Expo Router (File-based Routing)
+TypeScript
+Open Food Facts API – Barcode-Scan Produktdaten (kostenlos, kein API Key)
+Anthropic API (claude-sonnet-4-20250514) – Rezeptvorschläge, KI-Bilderkennung
+AsyncStorage – Datenpersistenz lokal auf dem Gerät
+Expo Camera – Kamera für Foto-Erkennung und Barcode-Scan
+Kein Backend – alles läuft lokal
 
-Ziel: Möglichst einfach und schlank. Kein Feature-Bloat, keine Gamification.
 
----
+Design System
+Farben
 
-## Tech Stack
+Hintergrund: #0a0a0a
+Surface 1: #111111
+Surface 2: #181818
+Border: #222222
+Text primär: #f0f0f0
+Text sekundär: #666666
+Akzent (Lime): #c8ff00
+Protein: #4F8EF7 (Blau)
+Carbs: #F7A94F (Orange)
+Fett: #F74F4F (Rot)
+Grün (Verbrannt/Positiv): #26de81
 
-- React Native mit Expo (Managed Workflow)
-- Expo Router (File-based Routing)
-- TypeScript
-- Open Food Facts API (kostenlos, kein API Key nötig) für Produktdaten per Barcode
-- Anthropic API (claude-sonnet-4-20250514) für Rezeptvorschläge basierend auf Kühlschrank-Inhalt und restlichen Makros
+Komponenten
 
----
+Border-Radius Cards: 16px
+Border-Radius Buttons: 12–14px
+Alle Cards: 1px Border #222222, Hintergrund #111111
 
-## Aktueller Stand
 
-- Home Screen (app/(tabs)/index.tsx) ist gebaut
-- Zeigt gegessene Kalorien, übrige Kalorien, Fortschrittsbalken für Protein / Kohlenhydrate / Fett
-- Zwei Buttons: "Was kann ich kochen?" und "Essen eintragen" – noch nicht funktional
-- Alle Daten sind noch hardcoded, kein State Management eingebaut
+Screens & Features
+1. Home Screen (Heute)
 
----
+Datum + App-Logo + Icon oben
+Kcal-Reihe: Gegessen / Verbrannt / Übrig (drei Cards)
+Makro-Ring (Donut-Chart) mit Protein/Carbs/Fett Fortschrittsbalken
+Hinweis-Card: "Dir fehlen noch Xg Protein – N Rezepte passen" mit Pfeil zu Rezepte Screen
+Mahlzeiten: Frühstück / Mittagessen / Abendessen / Snacks mit Items und Plus-Button
+Bottom Nav: Heute / + (groß, rund, Akzent) / Inventar / Profil
 
-## Was als nächstes gebaut werden muss
+2. Essen eintragen Screen
 
-### 1. Essen eintragen Screen
-- Barcode scannen via expo-camera
-- Produktdaten von Open Food Facts API abrufen (Makros, Name, Portionsgröße)
-- Alternativ: manuelle Textsuche
-- Eingetragenes Essen aktualisiert die Makros auf dem Home Screen
+Mahlzeit-Chips: Frühstück / Mittagessen / Abendessen / Snacks
+Scan-Optionen: Foto (groß, primär) / Barcode / Sprache
+Suchleiste
+"Zuletzt" – horizontaler Scroll zuletzt gegessener Items
+"Vorschläge" – häufige Items mit + Button
+Bereits eingetragene Items der gewählten Mahlzeit oben sichtbar
 
-### 2. Was kann ich kochen? Screen
-- Nutzer gibt Kühlschrank-Inhalt ein (manuell oder per Foto/Barcode)
-- App schickt Kühlschrank-Inhalt + restliche Tagesmakros an Anthropic API
-- API gibt einen konkreten Rezeptvorschlag zurück der die Lücke möglichst gut füllt
+3. Kamera Screen
 
-### 3. State Management
-- Tägliche Makros und gegessene Lebensmittel global verfügbar machen
-- Einfache Lösung bevorzugt: Zustand (Zustandsverwaltungsbibliothek) oder React Context
-- Daten sollen den Tag über persistent bleiben (AsyncStorage)
+Vollbild-Kamera mit Rahmen-Guide
+Zwei Modi: Gericht erkennen / Barcode
+Flash-Toggle, Mahlzeit-Label, Shutter-Button
 
----
+4. KI-Ergebnis Screen (Gericht)
 
-## Designprinzipien
+Foto mit Bounding Boxes und Zutaten-Labels
+Konfidenz-Score, Gesamt-kcal, Makro-Badges
+Liste erkannter Zutaten mit Checkbox, Menge, Konfidenz
+"Versteckte Kalorien?" aufklappbar
+CTA: "Zu [Mahlzeit] hinzufügen"
 
-- Schlank und fokussiert – nur was der Nutzer wirklich braucht
-- Keine Gamification, keine täglichen Quests, keine Streaks
-- Deutsch als primäre Sprache der UI
-- Farben: Protein = Blau (#4F8EF7), Kohlenhydrate = Orange (#F7A94F), Fett = Rot (#F74F4F)
-- Hintergrund: #f5f5f5, Cards: weiß, Border-Radius: 16px
+5. Rezepte Screen
 
----
+Restliche Tagesmakros oben
+Filter-Chips: Alle / Inventar-Match / <15 Min. / Vegetarisch
+Rezept-Cards mit Match-%, Zeit, Inventar-Status, Makros
 
-## Zielgruppe
+6. Inventar Screen
 
-Primär: Sportler und Fitness-affine Personen (18–30) die aktiv Makros tracken aber eine einfachere und intelligentere Lösung suchen als MyFitnessPal.
+Ablauf-Warnkarte für bald ablaufende Items
+"Jetzt aufbrauchen" – Rezept-Cards aus ablaufenden Zutaten
+Scan-Buttons: Kühlschrank scannen (primär) / Barcode / + manuell
+Tabs: Kühlschrank / Vorrat / Tiefkühler
+Items mit Haltbarkeit in Tagen
 
-Kernproblem das gelöst wird: Der Nutzer weiß abends nicht was er noch essen soll um seine Makros zu treffen, und weiß nicht was er aus seinen vorhandenen Zutaten kochen kann.
+7. KI-Ergebnis Screen (Inventar-Scan)
 
----
+Foto mit Farb-Segmentierung
+Liste erkannter Produkte mit Checkbox und Konfidenz
+CTA: "N Artikel ins Inventar"
 
-## Wichtige Hinweise
+8. Profil Screen
 
-- Expo Managed Workflow – kein Ejecting ohne guten Grund
-- Node.js v24 auf Windows
-- Testen ausschließlich über Expo Go auf physischem Gerät
-- Noch kein Backend – alles läuft vorerst lokal auf dem Gerät
-- Open Food Facts Basis-URL: https://world.openfoodfacts.org/api/v0/product/{barcode}.json
+Tagesziele, Körperdaten, Einstellungen
+Akzentfarbe wählbar, Ziel-Slider
+
+
+Nährwerte
+Pflicht (sichtbar): Kalorien, Protein, Kohlenhydrate, Fett, Ballaststoffe, Zucker
+Optional (aufklappbar): Vitamine, Mineralien, Natrium, gesättigte Fettsäuren
+
+Wichtige Hinweise
+
+Expo Managed Workflow – kein Ejecting
+Node.js v24, Windows, Expo Go zum Testen
+Open Food Facts: https://world.openfoodfacts.org/api/v0/product/{barcode}.json
+UI-Sprache: Deutsch
+Kein Backend, alles lokal auf dem Gerät
+Kein Supplement-Tracking, keine Einkaufsliste
+7-Tage-Streak ist das einzige Gamification-Element
+
+
+Aktueller Stand
+Home Screen als statischer Prototyp mit hardgecodeten Werten. Kein State Management, keine Navigation, keine API-Calls. Alles neu bauen nach High Fidelity Design.

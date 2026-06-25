@@ -1,26 +1,43 @@
-import { CameraView, useCameraPermissions } from 'expo-camera';
 import { router } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
-  KeyboardAvoidingView,
-  Platform,
-  Pressable,
   ScrollView,
   StyleSheet,
   Text,
-  TextInput,
   TouchableOpacity,
   View,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useFoodLog } from '@/context/food-log-context';
-import { fetchProductByBarcode } from '@/services/open-food-facts';
-import { getApiKey, getRecipeSuggestion, saveApiKey } from '@/services/anthropic';
+import { useInventory } from '@/context/inventory-context';
+import { getRecipeSuggestions, type RecipeSuggestion } from '@/services/anthropic';
+
+const ACCENT = '#c8ff00';
+
+const RECIPE_BG_COLORS = [
+  '#1a3828',
+  '#381a1c',
+  '#1a1c38',
+  '#363618',
+  '#281a38',
+];
+
+type Filter = 'alle' | 'inventar' | 'schnell' | 'vegetarisch' | 'highprotein';
+
+const FILTERS: { key: Filter; label: string }[] = [
+  { key: 'alle', label: 'Alle' },
+  { key: 'inventar', label: 'Inventar-Match' },
+  { key: 'schnell', label: '< 15 Min.' },
+  { key: 'vegetarisch', label: 'Vegetarisch' },
+  { key: 'highprotein', label: 'Highprotein' },
+];
 
 export default function CookScreen() {
   const { totals, goals } = useFoodLog();
+  const { items: inventoryItems } = useInventory();
+
   const remaining = {
     calories: Math.max(0, goals.calories - totals.calories),
     protein: Math.max(0, goals.protein - totals.protein),
@@ -28,505 +45,548 @@ export default function CookScreen() {
     fat: Math.max(0, goals.fat - totals.fat),
   };
 
-  const [apiKey, setApiKey] = useState('');
-  const [apiKeyStored, setApiKeyStored] = useState<string | null>(null);
-  const [apiKeyInput, setApiKeyInput] = useState('');
-
-  const [ingredients, setIngredients] = useState<string[]>([]);
-  const [inputValue, setInputValue] = useState('');
-  const [scanning, setScanning] = useState(false);
-  const [scanLoading, setScanLoading] = useState(false);
-  const [permission, requestPermission] = useCameraPermissions();
-
+  const [filter, setFilter] = useState<Filter>('alle');
+  const [recipes, setRecipes] = useState<RecipeSuggestion[]>([]);
   const [loading, setLoading] = useState(false);
-  const [recipe, setRecipe] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const scannedRef = useRef(false);
-
-  useEffect(() => {
-    getApiKey().then(key => {
-      setApiKeyStored(key);
-    });
-  }, []);
-
-  const handleSaveApiKey = useCallback(async () => {
-    if (!apiKeyInput.trim()) return;
-    await saveApiKey(apiKeyInput.trim());
-    setApiKeyStored(apiKeyInput.trim());
-    setApiKeyInput('');
-  }, [apiKeyInput]);
-
-  const addIngredient = useCallback((value: string) => {
-    const trimmed = value.trim();
-    if (!trimmed) return;
-    setIngredients(prev => (prev.includes(trimmed) ? prev : [...prev, trimmed]));
-    setInputValue('');
-  }, []);
-
-  const removeIngredient = useCallback((item: string) => {
-    setIngredients(prev => prev.filter(i => i !== item));
-  }, []);
-
-  const handleBarcode = useCallback(async ({ data }: { data: string }) => {
-    if (scannedRef.current || scanLoading) return;
-    scannedRef.current = true;
-    setScanLoading(true);
-    const product = await fetchProductByBarcode(data);
-    setScanLoading(false);
-    if (product) {
-      const label = product.brand ? `${product.name} (${product.brand})` : product.name;
-      setIngredients(prev => (prev.includes(label) ? prev : [...prev, label]));
-      setScanning(false);
-    } else {
-      Alert.alert('Nicht gefunden', 'Produkt nicht in der Datenbank.', [
-        { text: 'OK', onPress: () => { scannedRef.current = false; } },
-      ]);
-    }
-  }, [scanLoading]);
-
-  const openScanner = useCallback(async () => {
-    if (!permission?.granted) {
-      const result = await requestPermission();
-      if (!result.granted) return;
-    }
-    scannedRef.current = false;
-    setScanning(true);
-  }, [permission, requestPermission]);
-
-  const handleGetRecipe = useCallback(async () => {
-    const key = apiKeyStored;
-    if (!key) {
-      Alert.alert('API Key fehlt', 'Bitte zuerst den Anthropic API Key eingeben.');
-      return;
-    }
-    if (ingredients.length === 0) {
-      Alert.alert('Keine Zutaten', 'Bitte mindestens eine Zutat eintragen.');
-      return;
-    }
+  const loadRecipes = useCallback(async () => {
     setLoading(true);
-    setRecipe(null);
+    setError(null);
     try {
-      const result = await getRecipeSuggestion(ingredients, remaining, key);
-      setRecipe(result);
+      const result = await getRecipeSuggestions(
+        inventoryItems.map(i => ({ name: i.name, qty: i.qty })),
+        remaining,
+      );
+      setRecipes(result);
     } catch (e: any) {
-      Alert.alert('Fehler', e.message ?? 'Unbekannter Fehler');
+      setError(e.message ?? 'Rezepte konnten nicht geladen werden.');
     } finally {
       setLoading(false);
     }
-  }, [apiKeyStored, ingredients, remaining]);
+  }, [inventoryItems, remaining]);
 
-  // ── Scanner overlay ───────────────────────────────────────────────────────
-  if (scanning) {
-    return (
-      <View style={styles.container}>
-        <CameraView
-          style={StyleSheet.absoluteFill}
-          barcodeScannerSettings={{ barcodeTypes: ['ean13', 'ean8', 'upc_a', 'upc_e', 'code128', 'code39'] }}
-          onBarcodeScanned={handleBarcode}
-        />
-        <View style={styles.scanOverlay}>
-          <View style={styles.scanFrame} />
-          <Text style={styles.scanHint}>Barcode in den Rahmen halten</Text>
-          <TouchableOpacity style={styles.scanCancelBtn} onPress={() => setScanning(false)}>
-            <Text style={styles.scanCancelText}>Abbrechen</Text>
-          </TouchableOpacity>
-        </View>
-        {scanLoading && (
-          <View style={styles.scanLoadingOverlay}>
-            <ActivityIndicator size="large" color="#fff" />
-            <Text style={styles.scanLoadingText}>Produkt wird gesucht…</Text>
-          </View>
-        )}
-      </View>
-    );
-  }
+  useEffect(() => { loadRecipes(); }, []);
+
+  const filtered = useMemo(() => {
+    switch (filter) {
+      case 'inventar':    return recipes.filter(r => r.inventoryMatch >= 0.99);
+      case 'schnell':     return recipes.filter(r => r.prepTime <= 15);
+      case 'vegetarisch': return recipes.filter(r => r.vegetarian);
+      case 'highprotein': return recipes.filter(r => r.protein >= 30);
+      default:            return recipes;
+    }
+  }, [recipes, filter]);
 
   return (
-    <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : 'height'}>
+    <SafeAreaView style={styles.safe}>
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} hitSlop={12}>
-          <Text style={styles.cancelBtn}>Abbrechen</Text>
+        <Text style={styles.headerTitle}>Was jetzt kochen?</Text>
+        <TouchableOpacity onPress={() => router.back()} style={styles.closeBtn} hitSlop={12}>
+          <Text style={styles.closeBtnText}>✕</Text>
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Was kann ich kochen?</Text>
-        <View style={{ width: 80 }} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.scroll} keyboardShouldPersistTaps="handled">
+      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
 
-        {/* API Key Setup */}
-        {!apiKeyStored && (
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>Anthropic API Key</Text>
-            <Text style={styles.cardSubtitle}>Einmalig eingeben – wird sicher gespeichert.</Text>
-            <View style={styles.apiKeyRow}>
-              <TextInput
-                style={styles.apiKeyInput}
-                placeholder="sk-ant-..."
-                placeholderTextColor="#bbb"
-                value={apiKeyInput}
-                onChangeText={setApiKeyInput}
-                secureTextEntry
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
-              <TouchableOpacity style={styles.apiKeySaveBtn} onPress={handleSaveApiKey}>
-                <Text style={styles.apiKeySaveText}>Speichern</Text>
-              </TouchableOpacity>
+        {/* Macro card */}
+        <View style={styles.macroCard}>
+          <Text style={styles.macroCardLabel}>DU BRAUCHST NOCH</Text>
+          <View style={styles.macroCardRow}>
+            <View style={styles.kcalBlock}>
+              <Text style={styles.kcalBig}>{Math.round(remaining.calories)}</Text>
+              <Text style={styles.kcalUnit}>kcal</Text>
+            </View>
+            <View style={styles.macroPillsGroup}>
+              <MacroPill value={Math.round(remaining.protein)} label="Protein" color="#4F8EF7" />
+              <MacroPill value={Math.round(remaining.carbs)} label="Carbs" color="#F7A94F" />
+              <MacroPill value={Math.round(remaining.fat)} label="Fett" color="#F74F4F" />
             </View>
           </View>
-        )}
-
-        {/* Remaining macros */}
-        <View style={styles.macroBar}>
-          <Text style={styles.macroBarLabel}>Noch übrig:</Text>
-          <Text style={styles.macroBarValue}>{Math.round(remaining.calories)} kcal</Text>
-          <Text style={styles.macroBarDot}>·</Text>
-          <Text style={[styles.macroBarValue, { color: '#4F8EF7' }]}>{remaining.protein.toFixed(0)}g P</Text>
-          <Text style={styles.macroBarDot}>·</Text>
-          <Text style={[styles.macroBarValue, { color: '#F7A94F' }]}>{remaining.carbs.toFixed(0)}g K</Text>
-          <Text style={styles.macroBarDot}>·</Text>
-          <Text style={[styles.macroBarValue, { color: '#F74F4F' }]}>{remaining.fat.toFixed(0)}g F</Text>
         </View>
 
-        {/* Ingredient input */}
-        <View style={styles.card}>
-          <Text style={styles.cardTitle}>Kühlschrank-Inhalt</Text>
-          <View style={styles.inputRow}>
-            <TextInput
-              style={styles.ingredientInput}
-              placeholder="Zutat eingeben…"
-              placeholderTextColor="#bbb"
-              value={inputValue}
-              onChangeText={setInputValue}
-              onSubmitEditing={() => addIngredient(inputValue)}
-              returnKeyType="done"
-            />
-            <TouchableOpacity style={styles.addBtn} onPress={() => addIngredient(inputValue)}>
-              <Text style={styles.addBtnText}>+</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.scanBtn} onPress={openScanner}>
-              <Text style={styles.scanBtnText}>📷</Text>
-            </TouchableOpacity>
-          </View>
-
-          {ingredients.length > 0 ? (
-            <View style={styles.chips}>
-              {ingredients.map(item => (
-                <Pressable key={item} style={styles.chip} onPress={() => removeIngredient(item)}>
-                  <Text style={styles.chipText}>{item}</Text>
-                  <Text style={styles.chipRemove}>✕</Text>
-                </Pressable>
-              ))}
-            </View>
-          ) : (
-            <Text style={styles.emptyHint}>Noch keine Zutaten eingetragen.</Text>
-          )}
-        </View>
-
-        {/* Get recipe button */}
-        <TouchableOpacity
-          style={[styles.recipeBtn, (loading || ingredients.length === 0) && styles.recipeBtnDisabled]}
-          onPress={handleGetRecipe}
-          disabled={loading || ingredients.length === 0}
+        {/* Filter chips */}
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.filterRow}
         >
-          {loading ? (
-            <ActivityIndicator color="#fff" />
-          ) : (
-            <Text style={styles.recipeBtnText}>Rezept vorschlagen ✨</Text>
-          )}
-        </TouchableOpacity>
+          {FILTERS.map(f => (
+            <TouchableOpacity
+              key={f.key}
+              style={[styles.filterChip, filter === f.key && styles.filterChipActive]}
+              onPress={() => setFilter(f.key)}
+            >
+              <Text style={[styles.filterChipText, filter === f.key && styles.filterChipTextActive]}>
+                {f.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </ScrollView>
 
-        {/* Recipe result */}
-        {recipe && (
-          <View style={styles.recipeCard}>
-            <RecipeText text={recipe} />
-            <TouchableOpacity style={styles.retryBtn} onPress={handleGetRecipe}>
-              <Text style={styles.retryBtnText}>Anderes Rezept</Text>
+        {/* Count label */}
+        {!loading && !error && recipes.length > 0 && (
+          <Text style={styles.countLabel}>{filtered.length} REZEPTE PASSEN</Text>
+        )}
+
+        {/* Content states */}
+        {loading ? (
+          <View style={styles.stateCard}>
+            <ActivityIndicator color={ACCENT} size="large" />
+            <Text style={styles.stateText}>KI erstellt Rezeptvorschläge…</Text>
+            <Text style={styles.stateHint}>Das dauert ca. 10 Sekunden</Text>
+          </View>
+        ) : error ? (
+          <View style={styles.stateCard}>
+            <Text style={{ fontSize: 36, textAlign: 'center' }}>⚠️</Text>
+            <Text style={styles.stateText}>{error}</Text>
+            <TouchableOpacity style={styles.ghostBtn} onPress={loadRecipes}>
+              <Text style={styles.ghostBtnText}>Nochmal versuchen</Text>
             </TouchableOpacity>
           </View>
+        ) : recipes.length === 0 ? (
+          <View style={styles.stateCard}>
+            <Text style={{ fontSize: 40, textAlign: 'center' }}>🥦</Text>
+            <Text style={styles.stateText}>Keine Rezepte geladen.</Text>
+            <TouchableOpacity style={styles.accentBtn} onPress={loadRecipes}>
+              <Text style={styles.accentBtnText}>Rezepte laden ✨</Text>
+            </TouchableOpacity>
+          </View>
+        ) : filtered.length === 0 ? (
+          <View style={styles.stateCard}>
+            <Text style={styles.stateText}>Kein Rezept passt zu diesem Filter.</Text>
+            <TouchableOpacity style={styles.ghostBtn} onPress={() => setFilter('alle')}>
+              <Text style={styles.ghostBtnText}>Alle Rezepte zeigen</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          filtered.map((recipe) => {
+            const originalIndex = recipes.indexOf(recipe);
+            return (
+              <RecipeCard
+                key={recipe.name}
+                recipe={recipe}
+                colorIndex={originalIndex}
+                onPress={() =>
+                  router.push({
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                    pathname: '/recipe-detail' as any,
+                    params: {
+                      data: JSON.stringify(recipe),
+                      colorIndex: String(originalIndex),
+                    },
+                  })
+                }
+              />
+            );
+          })
         )}
+
       </ScrollView>
-    </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
-// Renders **bold** markers as styled text
-function RecipeText({ text }: { text: string }) {
-  const lines = text.split('\n');
+// ─── MacroPill ────────────────────────────────────────────────
+
+function MacroPill({ value, label, color }: { value: number; label: string; color: string }) {
   return (
-    <View style={{ gap: 4 }}>
-      {lines.map((line, i) => {
-        const isBold = line.startsWith('**') && line.includes('**', 2);
-        const clean = isBold ? line.replace(/\*\*/g, '') : line;
-        return (
-          <Text key={i} style={isBold ? styles.recipeBold : styles.recipeLine}>
-            {clean}
-          </Text>
-        );
-      })}
+    <View style={styles.macroPill}>
+      <Text style={[styles.macroPillValue, { color }]}>{value}g</Text>
+      <Text style={styles.macroPillLabel}>{label}</Text>
     </View>
   );
 }
 
+// ─── RecipeCard ───────────────────────────────────────────────
+
+function RecipeCard({
+  recipe,
+  colorIndex,
+  onPress,
+}: {
+  recipe: RecipeSuggestion;
+  colorIndex: number;
+  onPress: () => void;
+}) {
+  const bgColor = RECIPE_BG_COLORS[colorIndex % RECIPE_BG_COLORS.length];
+  const matchPct = Math.round(recipe.inventoryMatch * 100);
+  const allPresent = recipe.inventoryMatch >= 0.99;
+  const missingCount = Math.max(
+    0,
+    Math.round(recipe.ingredients.length * (1 - recipe.inventoryMatch)),
+  );
+
+  const hint =
+    recipe.vegetarian
+      ? `Vegetarisch · ${recipe.description.slice(0, 38)}`
+      : recipe.protein >= 30
+      ? `Deckt fehlendes Protein · ${recipe.protein}g P`
+      : recipe.description.slice(0, 52);
+
+  return (
+    <TouchableOpacity style={styles.recipeCard} onPress={onPress} activeOpacity={0.9}>
+      {/* Image placeholder */}
+      <View style={[styles.recipeImageArea, { backgroundColor: bgColor }]}>
+        <View style={styles.recipeImageFade} />
+
+        {/* Top row: time left, match right */}
+        <View style={styles.recipeImageTopRow}>
+          <View style={styles.timeBadge}>
+            <Text style={styles.timeBadgeText}>{recipe.prepTime} Min.</Text>
+          </View>
+          <View style={styles.matchBadge}>
+            <Text style={styles.matchBadgeText}>✦ {matchPct}% match</Text>
+          </View>
+        </View>
+
+        {/* Bottom right: inventory status */}
+        <View style={styles.recipeImageBottomRow}>
+          {allPresent ? (
+            <View style={styles.presentBadge}>
+              <Text style={styles.presentBadgeText}>✓ Alles da</Text>
+            </View>
+          ) : (
+            <View style={styles.absentBadge}>
+              <Text style={styles.absentBadgeText}>⚠ {missingCount} fehlt</Text>
+            </View>
+          )}
+        </View>
+      </View>
+
+      {/* Text content */}
+      <View style={styles.recipeCardContent}>
+        <Text style={styles.recipeName}>{recipe.name}</Text>
+        <Text style={styles.recipeHint} numberOfLines={1}>{hint}</Text>
+
+        <View style={styles.recipeMacroRow}>
+          <Text style={styles.recipeMacroKcal}>{recipe.calories} kcal</Text>
+          <View style={styles.recipeMacroDot} />
+          <Text style={[styles.recipeMacroVal, { color: '#4F8EF7' }]}>{recipe.protein}g P</Text>
+          <View style={styles.recipeMacroDot} />
+          <Text style={[styles.recipeMacroVal, { color: '#F7A94F' }]}>{recipe.carbs}g C</Text>
+          <View style={styles.recipeMacroDot} />
+          <Text style={[styles.recipeMacroVal, { color: '#F74F4F' }]}>{recipe.fat}g F</Text>
+        </View>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+// ─── Styles ───────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
-  container: {
+  safe: {
     flex: 1,
-    backgroundColor: '#f5f5f5',
+    backgroundColor: '#0a0a0a',
   },
+
+  // Header
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingTop: 56,
-    paddingBottom: 12,
-    backgroundColor: '#fff',
-    borderBottomWidth: 1,
-    borderBottomColor: '#eee',
+    paddingHorizontal: 20,
+    paddingVertical: 16,
+    borderBottomWidth: 0.5,
+    borderBottomColor: '#1a1a1a',
   },
   headerTitle: {
-    fontSize: 17,
-    fontWeight: '600',
-    color: '#111',
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#fff',
+    letterSpacing: -0.5,
   },
-  cancelBtn: {
-    fontSize: 16,
-    color: '#4F8EF7',
-    width: 80,
+  closeBtn: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
+  closeBtnText: {
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.6)',
+    fontWeight: '700',
+  },
+
   scroll: {
     padding: 16,
-    paddingBottom: 40,
-    gap: 12,
+    paddingBottom: 48,
+    gap: 14,
   },
-  card: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 16,
-    gap: 10,
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
-  },
-  cardTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#111',
-  },
-  cardSubtitle: {
-    fontSize: 13,
-    color: '#999',
-    marginTop: -6,
-  },
-  apiKeyRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  apiKeyInput: {
-    flex: 1,
-    backgroundColor: '#f0f0f0',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 14,
-    color: '#111',
-  },
-  apiKeySaveBtn: {
-    backgroundColor: '#4F8EF7',
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    justifyContent: 'center',
-  },
-  apiKeySaveText: {
-    color: '#fff',
-    fontWeight: '600',
-    fontSize: 14,
-  },
-  macroBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    gap: 6,
-    flexWrap: 'wrap',
-    shadowColor: '#000',
-    shadowOpacity: 0.04,
-    shadowRadius: 4,
-    elevation: 1,
-  },
-  macroBarLabel: {
-    fontSize: 14,
-    color: '#888',
-    marginRight: 2,
-  },
-  macroBarValue: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: '#111',
-  },
-  macroBarDot: {
-    color: '#ddd',
-    fontSize: 14,
-  },
-  inputRow: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  ingredientInput: {
-    flex: 1,
-    backgroundColor: '#f0f0f0',
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    fontSize: 15,
-    color: '#111',
-  },
-  addBtn: {
-    backgroundColor: '#4F8EF7',
-    borderRadius: 10,
-    width: 42,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  addBtnText: {
-    color: '#fff',
-    fontSize: 22,
-    fontWeight: '400',
-    lineHeight: 28,
-  },
-  scanBtn: {
-    backgroundColor: '#f0f0f0',
-    borderRadius: 10,
-    width: 42,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  scanBtnText: {
-    fontSize: 20,
-  },
-  chips: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  chip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#f0f0f0',
+
+  // Macro card
+  macroCard: {
+    backgroundColor: '#111111',
     borderRadius: 20,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    gap: 6,
+    borderWidth: 0.5,
+    borderColor: '#222222',
+    padding: 18,
+    gap: 14,
   },
-  chipText: {
-    fontSize: 14,
-    color: '#333',
+  macroCardLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.35)',
+    letterSpacing: 1.2,
+    textTransform: 'uppercase',
   },
-  chipRemove: {
-    fontSize: 11,
-    color: '#aaa',
-  },
-  emptyHint: {
-    fontSize: 13,
-    color: '#ccc',
-    textAlign: 'center',
-    paddingVertical: 8,
-  },
-  recipeBtn: {
-    backgroundColor: '#111',
-    borderRadius: 14,
-    paddingVertical: 16,
+  macroCardRow: {
+    flexDirection: 'row',
     alignItems: 'center',
+    gap: 20,
   },
-  recipeBtnDisabled: {
-    opacity: 0.4,
+  kcalBlock: {
+    gap: 1,
   },
-  recipeBtnText: {
+  kcalBig: {
+    fontSize: 48,
+    fontWeight: '800',
     color: '#fff',
-    fontSize: 17,
-    fontWeight: '700',
+    letterSpacing: -2,
+    lineHeight: 52,
   },
-  recipeCard: {
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    padding: 20,
-    gap: 16,
-    shadowColor: '#000',
-    shadowOpacity: 0.05,
-    shadowRadius: 8,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
+  kcalUnit: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.35)',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
   },
-  recipeBold: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#111',
-    marginTop: 8,
+  macroPillsGroup: {
+    flex: 1,
+    gap: 7,
   },
-  recipeLine: {
+  macroPill: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 7,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: 11,
+    backgroundColor: 'rgba(255,255,255,0.04)',
+    borderWidth: 0.5,
+    borderColor: '#222222',
+  },
+  macroPillValue: {
     fontSize: 15,
-    color: '#333',
-    lineHeight: 22,
+    fontWeight: '700',
+    letterSpacing: -0.3,
   },
-  retryBtn: {
-    borderWidth: 1,
-    borderColor: '#e0e0e0',
-    borderRadius: 12,
-    paddingVertical: 12,
-    alignItems: 'center',
-  },
-  retryBtnText: {
-    fontSize: 15,
-    color: '#555',
+  macroPillLabel: {
+    fontSize: 11,
+    color: 'rgba(255,255,255,0.4)',
     fontWeight: '500',
   },
-  // Scanner
-  scanOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    alignItems: 'center',
-    justifyContent: 'center',
+
+  // Filter chips
+  filterRow: {
+    flexDirection: 'row',
+    gap: 8,
   },
-  scanFrame: {
-    width: 240,
-    height: 160,
-    borderWidth: 2,
-    borderColor: '#fff',
-    borderRadius: 12,
+  filterChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 99,
+    backgroundColor: '#111111',
+    borderWidth: 0.5,
+    borderColor: '#222222',
   },
-  scanHint: {
-    marginTop: 16,
-    color: '#fff',
-    fontSize: 14,
-    textShadowColor: 'rgba(0,0,0,0.5)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 4,
+  filterChipActive: {
+    backgroundColor: ACCENT,
+    borderColor: ACCENT,
   },
-  scanCancelBtn: {
-    marginTop: 32,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+  filterChipText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.5)',
+  },
+  filterChipTextActive: {
+    color: '#000',
+  },
+
+  // Count
+  countLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.35)',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    paddingHorizontal: 2,
+  },
+
+  // State card
+  stateCard: {
+    backgroundColor: '#111111',
     borderRadius: 20,
-    paddingHorizontal: 24,
-    paddingVertical: 10,
+    borderWidth: 0.5,
+    borderColor: '#222222',
+    padding: 32,
+    alignItems: 'center',
+    gap: 12,
+    marginTop: 8,
   },
-  scanCancelText: {
-    color: '#fff',
-    fontSize: 15,
+  stateText: {
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.5)',
+    textAlign: 'center',
+    lineHeight: 20,
+  },
+  stateHint: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.25)',
+    textAlign: 'center',
+  },
+  accentBtn: {
+    backgroundColor: ACCENT,
+    borderRadius: 12,
+    paddingHorizontal: 24,
+    paddingVertical: 13,
+    marginTop: 4,
+  },
+  accentBtnText: {
+    color: '#000',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  ghostBtn: {
+    borderRadius: 12,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderWidth: 0.5,
+    borderColor: '#333333',
+  },
+  ghostBtnText: {
+    color: 'rgba(255,255,255,0.6)',
+    fontSize: 14,
     fontWeight: '600',
   },
-  scanLoadingOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 12,
+
+  // Recipe card
+  recipeCard: {
+    backgroundColor: '#111111',
+    borderRadius: 20,
+    borderWidth: 0.5,
+    borderColor: '#222222',
+    overflow: 'hidden',
   },
-  scanLoadingText: {
+  recipeImageArea: {
+    height: 185,
+  },
+  recipeImageFade: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 110,
+    backgroundColor: 'rgba(0,0,0,0.62)',
+  },
+  recipeImageTopRow: {
+    position: 'absolute',
+    top: 14,
+    left: 14,
+    right: 14,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  timeBadge: {
+    backgroundColor: 'rgba(0,0,0,0.58)',
+    borderRadius: 99,
+    paddingHorizontal: 11,
+    paddingVertical: 5,
+    borderWidth: 0.5,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  timeBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
     color: '#fff',
-    fontSize: 15,
+  },
+  matchBadge: {
+    backgroundColor: `${ACCENT}20`,
+    borderRadius: 99,
+    paddingHorizontal: 11,
+    paddingVertical: 5,
+    borderWidth: 0.5,
+    borderColor: `${ACCENT}50`,
+  },
+  matchBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: ACCENT,
+  },
+  recipeImageBottomRow: {
+    position: 'absolute',
+    bottom: 13,
+    right: 14,
+  },
+  presentBadge: {
+    backgroundColor: 'rgba(38,222,129,0.18)',
+    borderRadius: 99,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderWidth: 0.5,
+    borderColor: 'rgba(38,222,129,0.38)',
+  },
+  presentBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#26de81',
+  },
+  absentBadge: {
+    backgroundColor: 'rgba(247,169,79,0.18)',
+    borderRadius: 99,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderWidth: 0.5,
+    borderColor: 'rgba(247,169,79,0.38)',
+  },
+  absentBadgeText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#F7A94F',
+  },
+  recipeCardContent: {
+    padding: 16,
+    gap: 6,
+  },
+  recipeName: {
+    fontSize: 19,
+    fontWeight: '800',
+    color: '#fff',
+    letterSpacing: -0.5,
+    lineHeight: 24,
+  },
+  recipeHint: {
+    fontSize: 12,
+    color: ACCENT,
+    fontWeight: '500',
+    letterSpacing: -0.1,
+    opacity: 0.9,
+  },
+  recipeMacroRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    marginTop: 3,
+  },
+  recipeMacroKcal: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.5)',
+  },
+  recipeMacroDot: {
+    width: 3,
+    height: 3,
+    borderRadius: 99,
+    backgroundColor: 'rgba(255,255,255,0.18)',
+  },
+  recipeMacroVal: {
+    fontSize: 12,
+    fontWeight: '700',
   },
 });
