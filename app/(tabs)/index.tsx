@@ -114,7 +114,7 @@ export default function HomeScreen() {
 
         {/* AI suggestion banner */}
         {isBehind && (
-          <TouchableOpacity onPress={() => router.push('/cook')} activeOpacity={0.8}>
+          <TouchableOpacity onPress={() => router.push('/cook' as any)} activeOpacity={0.8}>
             <View style={styles.suggBanner}>
               <View style={styles.suggIconBox}>
                 <Text style={styles.suggEmoji}>✨</Text>
@@ -180,6 +180,7 @@ export default function HomeScreen() {
         )}
 
       </ScrollView>
+
     </SafeAreaView>
   );
 }

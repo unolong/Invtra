@@ -1,5 +1,6 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   ScrollView,
@@ -12,6 +13,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { useFoodLog } from '@/context/food-log-context';
 import { useInventory } from '@/context/inventory-context';
+import { calcInventoryMatch, matchBadgeColor } from '@/lib/recipe-match';
 import { getRecipeSuggestions, type RecipeSuggestion } from '@/services/anthropic';
 
 const ACCENT = '#c8ff00';
@@ -49,8 +51,65 @@ export default function CookScreen() {
   const [recipes, setRecipes] = useState<RecipeSuggestion[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const loadingRef = useRef(false);
 
+  // Runs once on mount: show cache immediately, reload only if stale
+  useEffect(() => {
+    let cancelled = false;
+
+    const init = async () => {
+      try {
+        const [cachedRaw, loadedAtRaw, changedAtRaw] = await Promise.all([
+          AsyncStorage.getItem('cached_recipes'),
+          AsyncStorage.getItem('recipes_loaded_at'),
+          AsyncStorage.getItem('inventory_last_changed'),
+        ]);
+
+        const cacheValid =
+          cachedRaw !== null &&
+          loadedAtRaw !== null &&
+          (changedAtRaw === null || Number(loadedAtRaw) > Number(changedAtRaw));
+
+        if (cacheValid) {
+          if (!cancelled) {
+            setRecipes(JSON.parse(cachedRaw!));
+            setLoading(false);
+          }
+          return;
+        }
+
+        if (!cancelled) setLoading(true);
+
+        const result = await getRecipeSuggestions(
+          inventoryItems.map(i => ({ name: i.name, qty: i.qty })),
+          remaining,
+        );
+
+        if (!cancelled) {
+          setRecipes(result);
+          setLoading(false);
+          await Promise.all([
+            AsyncStorage.setItem('cached_recipes', JSON.stringify(result)),
+            AsyncStorage.setItem('recipes_loaded_at', Date.now().toString()),
+          ]);
+        }
+      } catch {
+        if (!cancelled) {
+          setError('Rezepte konnten nicht geladen werden. Bitte versuche es erneut.');
+          setLoading(false);
+        }
+      }
+    };
+
+    init();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Exactly once on mount
+
+  // Manual reload (refresh button, retry button) — always fetches fresh
   const loadRecipes = useCallback(async () => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
     setLoading(true);
     setError(null);
     try {
@@ -59,33 +118,46 @@ export default function CookScreen() {
         remaining,
       );
       setRecipes(result);
-    } catch (e: any) {
-      setError(e.message ?? 'Rezepte konnten nicht geladen werden.');
+      await AsyncStorage.setItem('cached_recipes', JSON.stringify(result));
+      await AsyncStorage.setItem('recipes_loaded_at', Date.now().toString());
+    } catch {
+      setError('Rezepte konnten nicht geladen werden. Bitte versuche es erneut.');
     } finally {
       setLoading(false);
+      loadingRef.current = false;
     }
   }, [inventoryItems, remaining]);
 
-  useEffect(() => { loadRecipes(); }, []);
-
   const filtered = useMemo(() => {
+    const getMatch = (r: RecipeSuggestion) => calcInventoryMatch(r.ingredients, inventoryItems).matchPct;
+    const base = recipes.filter(r => getMatch(r) >= 50); // hide < 50% match
     switch (filter) {
-      case 'inventar':    return recipes.filter(r => r.inventoryMatch >= 0.99);
-      case 'schnell':     return recipes.filter(r => r.prepTime <= 15);
-      case 'vegetarisch': return recipes.filter(r => r.vegetarian);
-      case 'highprotein': return recipes.filter(r => r.protein >= 30);
-      default:            return recipes;
+      case 'inventar':    return base.filter(r => getMatch(r) >= 100);
+      case 'schnell':     return base.filter(r => r.prepTime <= 15);
+      case 'vegetarisch': return base.filter(r => r.vegetarian);
+      case 'highprotein': return base.filter(r => r.protein >= 30);
+      default:            return base;
     }
-  }, [recipes, filter]);
+  }, [recipes, filter, inventoryItems]);
 
   return (
     <SafeAreaView style={styles.safe}>
       {/* Header */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Was jetzt kochen?</Text>
-        <TouchableOpacity onPress={() => router.back()} style={styles.closeBtn} hitSlop={12}>
-          <Text style={styles.closeBtnText}>✕</Text>
-        </TouchableOpacity>
+        <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+          <TouchableOpacity
+            style={styles.closeBtn}
+            onPress={() => loadRecipes()}
+            hitSlop={12}
+            disabled={loading}
+          >
+            <Text style={[styles.closeBtnText, loading && { opacity: 0.35 }]}>↻</Text>
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => router.back()} style={styles.closeBtn} hitSlop={12}>
+            <Text style={styles.closeBtnText}>✕</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
@@ -141,7 +213,7 @@ export default function CookScreen() {
           <View style={styles.stateCard}>
             <Text style={{ fontSize: 36, textAlign: 'center' }}>⚠️</Text>
             <Text style={styles.stateText}>{error}</Text>
-            <TouchableOpacity style={styles.ghostBtn} onPress={loadRecipes}>
+            <TouchableOpacity style={styles.ghostBtn} onPress={() => loadRecipes()}>
               <Text style={styles.ghostBtnText}>Nochmal versuchen</Text>
             </TouchableOpacity>
           </View>
@@ -149,7 +221,7 @@ export default function CookScreen() {
           <View style={styles.stateCard}>
             <Text style={{ fontSize: 40, textAlign: 'center' }}>🥦</Text>
             <Text style={styles.stateText}>Keine Rezepte geladen.</Text>
-            <TouchableOpacity style={styles.accentBtn} onPress={loadRecipes}>
+            <TouchableOpacity style={styles.accentBtn} onPress={() => loadRecipes()}>
               <Text style={styles.accentBtnText}>Rezepte laden ✨</Text>
             </TouchableOpacity>
           </View>
@@ -168,6 +240,7 @@ export default function CookScreen() {
                 key={recipe.name}
                 recipe={recipe}
                 colorIndex={originalIndex}
+                inventoryItems={inventoryItems}
                 onPress={() =>
                   router.push({
                     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -204,19 +277,18 @@ function MacroPill({ value, label, color }: { value: number; label: string; colo
 function RecipeCard({
   recipe,
   colorIndex,
+  inventoryItems,
   onPress,
 }: {
   recipe: RecipeSuggestion;
   colorIndex: number;
+  inventoryItems: { name: string }[];
   onPress: () => void;
 }) {
   const bgColor = RECIPE_BG_COLORS[colorIndex % RECIPE_BG_COLORS.length];
-  const matchPct = Math.round(recipe.inventoryMatch * 100);
-  const allPresent = recipe.inventoryMatch >= 0.99;
-  const missingCount = Math.max(
-    0,
-    Math.round(recipe.ingredients.length * (1 - recipe.inventoryMatch)),
-  );
+  const { matchPct, missing: missingCount } = calcInventoryMatch(recipe.ingredients, inventoryItems);
+  const allPresent = matchPct >= 100;
+  const matchC = matchBadgeColor(matchPct);
 
   const hint =
     recipe.vegetarian
@@ -236,8 +308,8 @@ function RecipeCard({
           <View style={styles.timeBadge}>
             <Text style={styles.timeBadgeText}>{recipe.prepTime} Min.</Text>
           </View>
-          <View style={styles.matchBadge}>
-            <Text style={styles.matchBadgeText}>✦ {matchPct}% match</Text>
+          <View style={[styles.matchBadge, { backgroundColor: `${matchC}20`, borderColor: `${matchC}50` }]}>
+            <Text style={[styles.matchBadgeText, { color: matchC }]}>✦ {matchPct}% match</Text>
           </View>
         </View>
 
@@ -248,8 +320,8 @@ function RecipeCard({
               <Text style={styles.presentBadgeText}>✓ Alles da</Text>
             </View>
           ) : (
-            <View style={styles.absentBadge}>
-              <Text style={styles.absentBadgeText}>⚠ {missingCount} fehlt</Text>
+            <View style={[styles.absentBadge, { backgroundColor: `${matchC}1a`, borderColor: `${matchC}50` }]}>
+              <Text style={[styles.absentBadgeText, { color: matchC }]}>⚠ {missingCount} Zutaten fehlen</Text>
             </View>
           )}
         </View>
@@ -589,4 +661,5 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '700',
   },
+
 });

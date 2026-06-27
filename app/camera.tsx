@@ -1,4 +1,5 @@
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import * as ImagePicker from 'expo-image-picker';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useRef, useState } from 'react';
 import {
@@ -19,10 +20,18 @@ export default function CameraScreen() {
   const isInventory = mode === 'inventory';
 
   const [permission, requestPermission] = useCameraPermissions();
-  const [flash, setFlash] = useState<'off' | 'on'>('off');
+  const [torch, setTorch] = useState(false);
   const [camMode, setCamMode] = useState<'dish' | 'barcode'>('dish');
   const [capturing, setCapturing] = useState(false);
   const cameraRef = useRef<CameraView>(null);
+
+  const handleBack = () => {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/(tabs)');
+    }
+  };
 
   if (!permission) return <View style={styles.fill} />;
 
@@ -33,12 +42,20 @@ export default function CameraScreen() {
         <TouchableOpacity style={styles.accentBtn} onPress={requestPermission}>
           <Text style={styles.accentBtnText}>Zugriff erlauben</Text>
         </TouchableOpacity>
-        <TouchableOpacity onPress={() => router.back()} style={{ marginTop: 4 }}>
+        <TouchableOpacity onPress={handleBack} style={{ marginTop: 4 }}>
           <Text style={{ color: 'rgba(255,255,255,0.4)', fontSize: 15 }}>Abbrechen</Text>
         </TouchableOpacity>
       </SafeAreaView>
     );
   }
+
+  const navigateAfterCapture = () => {
+    if (isInventory) {
+      router.replace('/ai-inventory');
+    } else {
+      router.replace({ pathname: '/ai-result', params: { meal: meal ?? 'Frühstück' } });
+    }
+  };
 
   const handleShutter = async () => {
     if (capturing || !cameraRef.current) return;
@@ -47,11 +64,7 @@ export default function CameraScreen() {
       const photo = await cameraRef.current.takePictureAsync({ base64: true, quality: 0.7 });
       if (photo?.base64) {
         capturedPhoto.set(photo.uri, photo.base64);
-        if (isInventory) {
-          router.replace('/ai-inventory');
-        } else {
-          router.replace({ pathname: '/ai-result', params: { meal: meal ?? 'Frühstück' } });
-        }
+        navigateAfterCapture();
       } else {
         setCapturing(false);
       }
@@ -60,9 +73,26 @@ export default function CameraScreen() {
     }
   };
 
+  const handleGallery = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'] as ImagePicker.MediaType[],
+      allowsEditing: true,
+      quality: 0.8,
+      base64: true,
+    });
+    if (!result.canceled && result.assets[0]?.base64) {
+      capturedPhoto.set(result.assets[0].uri, result.assets[0].base64);
+      navigateAfterCapture();
+    }
+  };
+
   const handleBarcode = ({ data }: { data: string }) => {
     capturedPhoto.set('barcode:' + data, '');
-    router.back();
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/(tabs)');
+    }
   };
 
   return (
@@ -70,7 +100,7 @@ export default function CameraScreen() {
       <CameraView
         ref={cameraRef}
         style={StyleSheet.absoluteFill}
-        flash={flash}
+        enableTorch={torch}
         barcodeScannerSettings={
           camMode === 'barcode'
             ? { barcodeTypes: ['ean13', 'ean8', 'upc_a', 'upc_e', 'code128'] }
@@ -82,8 +112,8 @@ export default function CameraScreen() {
       {/* Top overlay */}
       <SafeAreaView style={styles.topOverlay} edges={['top']}>
         <View style={styles.topRow}>
-          <TouchableOpacity style={styles.circleBtn} onPress={() => router.back()} hitSlop={8}>
-            <Text style={styles.circleBtnText}>✕</Text>
+          <TouchableOpacity style={styles.backBtn} onPress={handleBack} hitSlop={8}>
+            <Text style={styles.backBtnText}>← Zurück</Text>
           </TouchableOpacity>
 
           {isInventory ? (
@@ -96,13 +126,7 @@ export default function CameraScreen() {
             </View>
           ) : <View style={{ width: 100 }} />}
 
-          <TouchableOpacity
-            style={[styles.circleBtn, flash === 'on' && styles.circleBtnActive]}
-            onPress={() => setFlash(f => f === 'off' ? 'on' : 'off')}
-            hitSlop={8}
-          >
-            <Text style={styles.circleBtnText}>⚡</Text>
-          </TouchableOpacity>
+          <View style={{ width: 40 }} />
         </View>
 
         {!isInventory && (
@@ -132,24 +156,41 @@ export default function CameraScreen() {
         </View>
       )}
 
-      {/* Shutter */}
+      {/* Bottom controls: Gallery | Shutter | Torch */}
       {(camMode === 'dish' || isInventory) && (
-        <View style={styles.bottomOverlay}>
+        <SafeAreaView style={styles.bottomOverlay} edges={['bottom']}>
           <Text style={styles.bottomHint}>
             {isInventory ? 'Kühlschrank oder Zutaten fotografieren' : 'Gericht fotografieren'}
           </Text>
-          <TouchableOpacity
-            style={[styles.shutter, capturing && { opacity: 0.5 }]}
-            onPress={handleShutter}
-            disabled={capturing}
-            activeOpacity={0.85}
-          >
-            {capturing
-              ? <ActivityIndicator color="#000" />
-              : <View style={styles.shutterInner} />
-            }
-          </TouchableOpacity>
-        </View>
+          <View style={styles.bottomRow}>
+            {/* Gallery */}
+            <TouchableOpacity style={styles.sideBtn} onPress={handleGallery} hitSlop={8}>
+              <Text style={styles.sideBtnText}>🖼</Text>
+            </TouchableOpacity>
+
+            {/* Shutter */}
+            <TouchableOpacity
+              style={[styles.shutter, capturing && { opacity: 0.5 }]}
+              onPress={handleShutter}
+              disabled={capturing}
+              activeOpacity={0.85}
+            >
+              {capturing
+                ? <ActivityIndicator color="#000" />
+                : <View style={styles.shutterInner} />
+              }
+            </TouchableOpacity>
+
+            {/* Torch */}
+            <TouchableOpacity
+              style={[styles.sideBtn, torch && styles.sideBtnActive]}
+              onPress={() => setTorch(prev => !prev)}
+              hitSlop={8}
+            >
+              <Text style={[styles.sideBtnText, { color: torch ? ACCENT : '#f0f0f0' }]}>⚡</Text>
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
       )}
     </View>
   );
@@ -178,14 +219,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingTop: 8,
   },
-  circleBtn: {
-    width: 40, height: 40, borderRadius: 20,
+  backBtn: {
+    paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20,
     backgroundColor: 'rgba(0,0,0,0.55)',
-    borderWidth: 0.5, borderColor: 'rgba(255,255,255,0.2)',
-    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 0.5, borderColor: 'rgba(255,255,255,0.25)',
   },
-  circleBtnActive: { backgroundColor: `${ACCENT}30`, borderColor: `${ACCENT}60` },
-  circleBtnText: { fontSize: 15, color: '#fff' },
+  backBtnText: { fontSize: 15, fontWeight: '600', color: '#f0f0f0' },
   badge: {
     paddingHorizontal: 14, paddingVertical: 7, borderRadius: 99,
     backgroundColor: `${ACCENT}20`, borderWidth: 0.5, borderColor: `${ACCENT}50`,
@@ -220,13 +259,28 @@ const styles = StyleSheet.create({
 
   bottomOverlay: {
     position: 'absolute', bottom: 0, left: 0, right: 0,
-    paddingBottom: 50, paddingTop: 28,
-    alignItems: 'center', gap: 20,
+    paddingTop: 20, paddingBottom: 16,
+    alignItems: 'center', gap: 16,
     backgroundColor: 'rgba(0,0,0,0.42)',
   },
   bottomHint: {
     color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: '500',
   },
+  bottomRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    width: '100%',
+    paddingHorizontal: 48,
+  },
+  sideBtn: {
+    width: 48, height: 48, borderRadius: 24,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderWidth: 0.5, borderColor: 'rgba(255,255,255,0.2)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  sideBtnActive: { backgroundColor: `${ACCENT}30`, borderColor: `${ACCENT}60` },
+  sideBtnText: { fontSize: 20 },
   shutter: {
     width: 76, height: 76, borderRadius: 38,
     borderWidth: 4, borderColor: 'rgba(255,255,255,0.85)',

@@ -34,7 +34,10 @@ export function InventoryProvider({ children }: { children: React.ReactNode }) {
 
   const persist = useCallback(async (next: InventoryItem[]) => {
     setItems(next);
-    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    await AsyncStorage.multiSet([
+      [STORAGE_KEY, JSON.stringify(next)],
+      ['inventory_last_changed', Date.now().toString()],
+    ]);
   }, []);
 
   const addItems = useCallback(

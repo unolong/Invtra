@@ -3,6 +3,8 @@ import { useState } from 'react';
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useInventory } from '@/context/inventory-context';
+import { calcInventoryMatch, isBasicIngredient, matchBadgeColor } from '@/lib/recipe-match';
 import type { RecipeSuggestion } from '@/services/anthropic';
 
 const ACCENT = '#c8ff00';
@@ -18,21 +20,20 @@ const RECIPE_BG_COLORS = [
 export default function RecipeDetailScreen() {
   const { data, colorIndex: ci } = useLocalSearchParams<{ data: string; colorIndex: string }>();
   const insets = useSafeAreaInsets();
+  const { items: inventoryItems } = useInventory();
   const [nutritionExpanded, setNutritionExpanded] = useState(false);
   if (!data) return null;
 
   const recipe: RecipeSuggestion = JSON.parse(data as string);
   const bgColor = RECIPE_BG_COLORS[(parseInt(ci ?? '0', 10)) % RECIPE_BG_COLORS.length];
-  const matchPct = Math.round(recipe.inventoryMatch * 100);
+  const { matchPct, missing: missingCount } = calcInventoryMatch(recipe.ingredients, inventoryItems);
+  const matchC = matchBadgeColor(matchPct);
 
   const isPresent = (ingredient: string) => {
     const lower = ingredient.toLowerCase();
-    return recipe.usedInventoryItems.some(item =>
-      lower.includes(item.toLowerCase())
-    );
+    if (isBasicIngredient(lower)) return true;
+    return inventoryItems.some(item => lower.includes(item.name.toLowerCase()));
   };
-
-  const missingCount = recipe.ingredients.filter(ing => !isPresent(ing)).length;
 
   return (
     <View style={styles.root}>
@@ -62,8 +63,8 @@ export default function RecipeDetailScreen() {
           <View style={styles.infoBadge}>
             <Text style={styles.infoBadgeText}>{recipe.difficulty ?? 'einfach'}</Text>
           </View>
-          <View style={[styles.infoBadge, styles.matchBadge]}>
-            <Text style={styles.matchBadgeText}>✦ {matchPct}% match</Text>
+          <View style={[styles.infoBadge, { backgroundColor: `${matchC}15`, borderColor: `${matchC}40` }]}>
+            <Text style={[styles.matchBadgeText, { color: matchC }]}>✦ {matchPct}% match</Text>
           </View>
         </View>
 
@@ -113,7 +114,7 @@ export default function RecipeDetailScreen() {
             {missingCount === 0 ? (
               <Text style={styles.allPresentText}>Alles da</Text>
             ) : (
-              <Text style={styles.missingText}>{missingCount} fehlt</Text>
+              <Text style={[styles.missingText, { color: matchC }]}>{missingCount} Zutaten fehlen</Text>
             )}
           </View>
 

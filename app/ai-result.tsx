@@ -55,7 +55,7 @@ export default function AiResultScreen() {
       setItems(result.items.map((item, i) => ({ ...item, id: String(i), checked: true })));
       setHidden(result.hidden);
     } catch (e: any) {
-      setError(e.message ?? 'Analyse fehlgeschlagen');
+      setError('Scan fehlgeschlagen. Bitte versuche es erneut.');
     } finally {
       setLoading(false);
     }

@@ -5,7 +5,6 @@ import {
   ActivityIndicator,
   Alert,
   Animated,
-  Keyboard,
   KeyboardAvoidingView,
   Modal,
   Platform,
@@ -31,17 +30,21 @@ const MEALS = ['Frühstück', 'Mittagessen', 'Snacks', 'Abendessen'];
 const GLYPH_COLORS = ['#4f8bff', '#ffb547', '#26de81', '#ff5e5e'];
 
 type Tab = 'scan' | 'search';
-type UnitLabel = 'Gramm' | 'ml' | 'Stück' | 'Portion' | 'EL' | 'TL';
-
-const ALL_LOG_UNITS: UnitLabel[] = ['Gramm', 'ml', 'Stück', 'Portion', 'EL', 'TL'];
+type UnitLabel = 'Gramm' | 'kg' | 'ml' | 'L' | 'Stück' | 'EL' | 'TL';
 
 const UNIT_GRAMS: Record<UnitLabel, number> = {
-  Gramm: 1, ml: 1, Stück: 100, Portion: 100, EL: 15, TL: 5,
+  Gramm: 1, kg: 1000, ml: 1, L: 1000, Stück: 100, EL: 15, TL: 5,
 };
 
 const UNIT_STEP: Record<UnitLabel, number> = {
-  Gramm: 10, ml: 10, Stück: 1, Portion: 1, EL: 1, TL: 1,
+  Gramm: 10, kg: 1, ml: 10, L: 1, Stück: 1, EL: 1, TL: 1,
 };
+
+function getUnitsForProduct(product: Product): UnitLabel[] {
+  if (product.productType === 'piece') return ['Stück', 'Gramm'];
+  if (product.isDrink || product.productType === 'liquid') return ['ml', 'L'];
+  return ['Gramm', 'kg', 'EL', 'TL'];
+}
 
 interface Suggestion {
   name: string;
@@ -152,6 +155,7 @@ export default function LogFoodScreen() {
   const [portion, setPortion] = useState(100);
   const [portionUnit, setPortionUnit] = useState<'g' | 'ml'>('g');
   const [recentMeals, setRecentMeals] = useState<RecentMeal[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
   const [addCount, setAddCount] = useState(0);
   const [inventoryMatches, setInventoryMatches] = useState<InventoryMatch[]>([]);
   const [showDeductModal, setShowDeductModal] = useState(false);
@@ -166,6 +170,32 @@ export default function LogFoodScreen() {
   useEffect(() => {
     getRecentMeals().then(setRecentMeals);
   }, []);
+
+  // Debounced live search — fires 180ms after the last keystroke
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const q = searchQuery.trim();
+
+    if (!q) {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      setSearchResults([]);
+      setIsSearching(false);
+      return;
+    }
+
+    setIsSearching(true);
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+
+    debounceRef.current = setTimeout(() => {
+      const recentNames = new Set(recentMeals.map(m => m.name.toLowerCase()));
+      setSearchResults(searchBls(q, { recentNames }));
+      setIsSearching(false);
+    }, 180);
+
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [searchQuery, recentMeals]);
 
   const selectProduct = useCallback((p: Product) => {
     setProduct(p);
@@ -191,12 +221,6 @@ export default function LogFoodScreen() {
     },
     [scanned, loading, selectProduct],
   );
-
-  const handleSearch = useCallback(() => {
-    if (!searchQuery.trim()) return;
-    Keyboard.dismiss();
-    setSearchResults(searchBls(searchQuery.trim()));
-  }, [searchQuery]);
 
   const finishAdd = useCallback(() => {
     setProduct(null);
@@ -341,14 +365,13 @@ export default function LogFoodScreen() {
               placeholder="Lebensmittel suchen..."
               placeholderTextColor="rgba(255,255,255,0.3)"
               value={searchQuery}
-              onChangeText={t => { setSearchQuery(t); if (!t) setSearchResults([]); }}
-              onSubmitEditing={handleSearch}
-              returnKeyType="search"
+              onChangeText={setSearchQuery}
+              returnKeyType="done"
               autoCorrect={false}
             />
             {searchQuery.length > 0 && (
-              <TouchableOpacity onPress={handleSearch} style={styles.searchGoBtn}>
-                <Text style={styles.searchGoBtnText}>Go</Text>
+              <TouchableOpacity onPress={() => setSearchQuery('')} style={styles.searchClearBtn} hitSlop={8}>
+                <Text style={styles.searchClearText}>✕</Text>
               </TouchableOpacity>
             )}
           </View>
@@ -381,8 +404,21 @@ export default function LogFoodScreen() {
                 </TouchableOpacity>
               ))}
             </View>
-          ) : searchQuery.length > 0 ? (
-            <Text style={styles.emptyText}>Keine Ergebnisse für „{searchQuery}"</Text>
+          ) : searchQuery.length > 0 && !isSearching ? (
+            <TouchableOpacity
+              style={styles.noResultsHint}
+              onPress={() => setTab('scan')}
+              activeOpacity={0.75}
+            >
+              <View style={styles.noResultsIcon}>
+                <Text style={{ fontSize: 22 }}>▣</Text>
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.noResultsTitle}>Nicht gefunden?</Text>
+                <Text style={styles.noResultsSub}>Per Barcode scannen</Text>
+              </View>
+              <Text style={styles.noResultsChevron}>›</Text>
+            </TouchableOpacity>
           ) : null}
 
           {!searchQuery && recentMeals.length > 0 && (
@@ -622,11 +658,12 @@ function ProductDetail({
   };
 
   const handleUnitSelect = (u: UnitLabel) => {
-    const wasWeight = displayUnit === 'Gramm' || displayUnit === 'ml';
-    const isWeight  = u === 'Gramm' || u === 'ml';
+    const continuous: UnitLabel[] = ['Gramm', 'kg', 'ml', 'L'];
+    const wasWeight = continuous.includes(displayUnit);
+    const isWeight  = continuous.includes(u);
     setDisplayUnit(u);
     setUnitMenuVisible(false);
-    onUnitRef.current(u === 'ml' ? 'ml' : 'g');
+    onUnitRef.current((u === 'ml' || u === 'L') ? 'ml' : 'g');
     if (wasWeight && !isWeight) setQtyText('1');
   };
 
@@ -660,7 +697,7 @@ function ProductDetail({
             <MacroBadge label="Fett"    value={`${fat}g`}   color="#ff5e5e" />
           </ScrollView>
 
-          {/* Portion input row */}
+          {/* Portion input row: [−] [number] [+] | [unit ▾] */}
           <View style={styles.portionRow}>
             <TouchableOpacity style={styles.portionStepBtn} onPress={() => adjustQty(-step)} activeOpacity={0.7}>
               <Text style={styles.portionStepText}>−</Text>
@@ -677,13 +714,15 @@ function ProductDetail({
               selectTextOnFocus
             />
 
+            <TouchableOpacity style={styles.portionStepBtn} onPress={() => adjustQty(step)} activeOpacity={0.7}>
+              <Text style={styles.portionStepText}>+</Text>
+            </TouchableOpacity>
+
+            <View style={styles.portionDivider} />
+
             <TouchableOpacity style={styles.unitBtn} onPress={() => setUnitMenuVisible(true)} activeOpacity={0.75}>
               <Text style={styles.unitBtnText}>{displayUnit}</Text>
               <Text style={styles.unitChevron}>▾</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={styles.portionStepBtn} onPress={() => adjustQty(step)} activeOpacity={0.7}>
-              <Text style={styles.portionStepText}>+</Text>
             </TouchableOpacity>
           </View>
 
@@ -701,7 +740,7 @@ function ProductDetail({
             >
               <TouchableOpacity style={styles.unitModalBox} activeOpacity={1}>
                 <Text style={styles.unitModalTitle}>Einheit wählen</Text>
-                {ALL_LOG_UNITS.map(u => (
+                {getUnitsForProduct(product).map(u => (
                   <TouchableOpacity
                     key={u}
                     style={[styles.unitModalRow, displayUnit === u && styles.unitModalRowActive]}
@@ -974,16 +1013,53 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: '#fff',
   },
-  searchGoBtn: {
-    backgroundColor: ACCENT,
-    borderRadius: 8,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
+  searchClearBtn: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  searchGoBtnText: {
-    fontSize: 13,
+  searchClearText: {
+    fontSize: 10,
+    color: 'rgba(255,255,255,0.5)',
     fontWeight: '700',
-    color: '#000',
+  },
+
+  noResultsHint: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: '#111111',
+    borderRadius: 14,
+    borderWidth: 0.5,
+    borderColor: '#222222',
+    padding: 14,
+  },
+  noResultsIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  noResultsTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#fff',
+    marginBottom: 2,
+  },
+  noResultsSub: {
+    fontSize: 12,
+    color: ACCENT,
+    fontWeight: '500',
+  },
+  noResultsChevron: {
+    fontSize: 22,
+    color: 'rgba(255,255,255,0.35)',
+    fontWeight: '300',
   },
 
   deBadge: {
@@ -1246,12 +1322,12 @@ const styles = StyleSheet.create({
   portionRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
     backgroundColor: '#181818',
     borderRadius: 16,
     borderWidth: 0.5,
     borderColor: '#222222',
-    padding: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
   },
   portionStepBtn: {
     width: 44,
@@ -1260,6 +1336,7 @@ const styles = StyleSheet.create({
     backgroundColor: '#222222',
     alignItems: 'center',
     justifyContent: 'center',
+    flexShrink: 0,
   },
   portionStepText: {
     fontSize: 24,
@@ -1269,26 +1346,31 @@ const styles = StyleSheet.create({
   },
   portionInput: {
     flex: 1,
-    fontSize: 30,
+    fontSize: 28,
     fontWeight: '800',
     color: '#fff',
     textAlign: 'center',
     letterSpacing: -1,
     paddingVertical: 2,
+    marginHorizontal: 6,
+  },
+  portionDivider: {
+    width: 1,
+    height: 28,
+    backgroundColor: '#2e2e2e',
+    marginHorizontal: 8,
+    flexShrink: 0,
   },
   unitBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#222222',
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
     gap: 4,
-    borderWidth: 0.5,
-    borderColor: '#333333',
+    flexShrink: 0,
   },
   unitBtnText: {
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: '700',
     color: '#fff',
     letterSpacing: -0.2,

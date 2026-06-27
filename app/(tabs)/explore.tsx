@@ -1,6 +1,7 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import DateTimePicker from '@react-native-community/datetimepicker';
 import { router } from 'expo-router';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -25,6 +26,8 @@ import {
   type InventoryLocation,
   useInventory,
 } from '@/context/inventory-context';
+import { calcInventoryMatch, matchBadgeColor } from '@/lib/recipe-match';
+import { getRecipeSuggestions, type RecipeSuggestion } from '@/services/anthropic';
 import { searchBls, type BlsItem } from '@/services/bls-search';
 
 // Enable LayoutAnimation on Android
@@ -64,12 +67,6 @@ const EXPIRY_CHIPS = [
 ] as const;
 
 const LOCATIONS: InventoryLocation[] = ['Kühlschrank', 'Vorrat', 'Tiefkühler'];
-
-const MOCK_RECIPES = [
-  { id: '1', name: 'Schnell-Omelette', time: '10 Min.', kcal: 340, protein: 22 },
-  { id: '2', name: 'Pfannengemüse',    time: '15 Min.', kcal: 280, protein: 12 },
-  { id: '3', name: 'Frittata',         time: '20 Min.', kcal: 420, protein: 26 },
-];
 
 // ─── Helpers ──────────────────────────────────────────────────
 
@@ -124,6 +121,10 @@ export default function InventarScreen() {
   const [viewMode, setViewMode]       = useState<'list' | 'grid'>('list');
   const [searchQuery, setSearchQuery] = useState('');
   const [expandedId, setExpandedId]   = useState<string | null>(null);
+  const [invRecipes, setInvRecipes]   = useState<RecipeSuggestion[]>([]);
+  const [invLoading, setInvLoading]   = useState(false);
+  const invLoadingRef = useRef(false);
+  const invInitRef    = useRef(false);
 
   // Search modal state
   const [searchModalOpen, setSearchModalOpen] = useState(false);
@@ -155,11 +156,54 @@ export default function InventarScreen() {
     setExpandedId(curr => curr === id ? null : id);
   };
 
+  const loadInvRecipes = useCallback(async (expiringItems: InventoryItem[], force = false) => {
+    if (invLoadingRef.current) return;
+    if (!force) {
+      const [cachedRaw, loadedAtRaw, lastChangedRaw] = await Promise.all([
+        AsyncStorage.getItem('cached_inventory_recipes'),
+        AsyncStorage.getItem('inventory_recipes_loaded_at'),
+        AsyncStorage.getItem('inventory_last_changed'),
+      ]);
+      if (cachedRaw) {
+        setInvRecipes(JSON.parse(cachedRaw));
+        const loadedAt = loadedAtRaw ? parseInt(loadedAtRaw, 10) : 0;
+        const lastChanged = lastChangedRaw ? parseInt(lastChangedRaw, 10) : 0;
+        if (lastChanged <= loadedAt) return;
+      }
+    }
+    if (expiringItems.length === 0) return;
+    invLoadingRef.current = true;
+    setInvLoading(true);
+    try {
+      const result = await getRecipeSuggestions(
+        expiringItems.map(i => ({ name: i.name, qty: i.qty })),
+        { calories: 500, protein: 25, carbs: 50, fat: 15 },
+      );
+      setInvRecipes(result);
+      await Promise.all([
+        AsyncStorage.setItem('cached_inventory_recipes', JSON.stringify(result)),
+        AsyncStorage.setItem('inventory_recipes_loaded_at', Date.now().toString()),
+      ]);
+    } catch {
+      // keep cached data on error
+    } finally {
+      setInvLoading(false);
+      invLoadingRef.current = false;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (expiring.length > 0 && !invInitRef.current) {
+      invInitRef.current = true;
+      loadInvRecipes(expiring);
+    }
+  }, [expiring, loadInvRecipes]);
+
   const handleBlsSearch = (q: string) => {
     setBlsQuery(q);
     if (!q.trim()) { setBlsResults([]); return; }
     setBlsSearching(true);
-    setBlsResults(searchBls(q, 25));
+    setBlsResults(searchBls(q, { limit: 25 }));
     setBlsSearching(false);
   };
 
@@ -189,13 +233,23 @@ export default function InventarScreen() {
             <Text style={s.countLabel}>{items.length} ARTIKEL</Text>
             <Text style={s.headline}>Inventar</Text>
           </View>
-          <TouchableOpacity
-            style={s.toggleBtn}
-            onPress={() => { setViewMode(v => v === 'list' ? 'grid' : 'list'); setExpandedId(null); }}
-            hitSlop={8}
-          >
-            <Text style={s.toggleIcon}>{viewMode === 'list' ? '⊞' : '☰'}</Text>
-          </TouchableOpacity>
+          <View style={{ flexDirection: 'row', gap: 8 }}>
+            <TouchableOpacity
+              style={s.toggleBtn}
+              onPress={() => loadInvRecipes(expiring, true)}
+              disabled={invLoading}
+              hitSlop={8}
+            >
+              <Text style={[s.toggleIcon, invLoading && { opacity: 0.35 }]}>↻</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={s.toggleBtn}
+              onPress={() => { setViewMode(v => v === 'list' ? 'grid' : 'list'); setExpandedId(null); }}
+              hitSlop={8}
+            >
+              <Text style={s.toggleIcon}>{viewMode === 'list' ? '⊞' : '☰'}</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
         {/* ── Ablauf-Warnkarte ── */}
@@ -220,35 +274,64 @@ export default function InventarScreen() {
           <View>
             <View style={s.sectionHeaderRow}>
               <Text style={s.sectionLabel}>JETZT AUFBRAUCHEN {expiring.length}</Text>
-              <TouchableOpacity hitSlop={8}>
-                <Text style={s.sectionAllLink}>Alle ›</Text>
+              <TouchableOpacity
+                hitSlop={8}
+                onPress={() => loadInvRecipes(expiring, true)}
+                disabled={invLoading}
+              >
+                <Text style={[s.sectionAllLink, invLoading && { opacity: 0.35 }]}>↻</Text>
               </TouchableOpacity>
             </View>
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={s.recipeRow}
-            >
-              {MOCK_RECIPES.map(recipe => (
-                <TouchableOpacity key={recipe.id} style={s.recipeCard} activeOpacity={0.85}>
-                  <View style={[StyleSheet.absoluteFill, s.recipeOverlay]} />
-                  <View style={s.recipeCardContent}>
-                    <View style={s.recipeTimeBadge}>
-                      <Text style={s.recipeTimeText}>⏱ {recipe.time}</Text>
-                    </View>
-                    <View style={s.recipeTags}>
-                      {expiring.slice(0, 2).map(e => (
-                        <View key={e.id} style={s.recipeTag}>
-                          <Text style={s.recipeTagText} numberOfLines={1}>{e.name}</Text>
+
+            {invLoading && invRecipes.length === 0 ? (
+              <View style={s.invLoadingCard}>
+                <ActivityIndicator color={ACCENT} size="small" />
+                <Text style={s.invLoadingText}>KI erstellt Rezepte aus ablaufenden Zutaten…</Text>
+              </View>
+            ) : invRecipes.length > 0 ? (
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={s.recipeRow}
+              >
+                {invRecipes.map((recipe, i) => {
+                  const { matchPct, missing } = calcInventoryMatch(recipe.ingredients, items);
+                  const matchC = matchBadgeColor(matchPct);
+                  return (
+                    <TouchableOpacity
+                      key={recipe.name}
+                      style={s.recipeCard}
+                      activeOpacity={0.85}
+                      onPress={() => router.push({
+                        pathname: '/recipe-detail',
+                        params: { data: JSON.stringify(recipe), colorIndex: String(i % 5) },
+                      })}
+                    >
+                      <View style={[StyleSheet.absoluteFill, s.recipeOverlay]} />
+                      <View style={s.recipeCardContent}>
+                        <View style={s.recipeTimeBadge}>
+                          <Text style={s.recipeTimeText}>⏱ {recipe.prepTime} Min.</Text>
                         </View>
-                      ))}
-                    </View>
-                    <Text style={s.recipeName} numberOfLines={2}>{recipe.name}</Text>
-                    <Text style={s.recipeMacros}>{recipe.kcal} kcal · {recipe.protein}g Protein</Text>
-                  </View>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
+                        <View style={[s.recipeMatchBadge, { backgroundColor: `${matchC}20`, borderColor: `${matchC}40` }]}>
+                          <Text style={[s.recipeMatchText, { color: matchC }]}>
+                            {matchPct >= 100 ? '✓ Alles da' : `⚠ ${missing} fehlen`}
+                          </Text>
+                        </View>
+                        <View style={s.recipeTags}>
+                          {recipe.usedInventoryItems.slice(0, 2).map(item => (
+                            <View key={item} style={s.recipeTag}>
+                              <Text style={s.recipeTagText} numberOfLines={1}>{item}</Text>
+                            </View>
+                          ))}
+                        </View>
+                        <Text style={s.recipeName} numberOfLines={2}>{recipe.name}</Text>
+                        <Text style={s.recipeMacros}>{recipe.calories} kcal · {recipe.protein}g P</Text>
+                      </View>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+            ) : null}
           </View>
         )}
 
@@ -752,6 +835,12 @@ const s = StyleSheet.create({
   },
   sectionAllLink: { fontSize: 13, fontWeight: '600', color: ACCENT },
   recipeRow:      { gap: 10, paddingRight: 4 },
+  invLoadingCard: {
+    backgroundColor: '#111111', borderRadius: 16, borderWidth: 0.5,
+    borderColor: '#222222', padding: 20,
+    flexDirection: 'row', alignItems: 'center', gap: 12,
+  },
+  invLoadingText: { fontSize: 13, color: 'rgba(255,255,255,0.4)', fontWeight: '500', flex: 1 },
   recipeCard: {
     width: 175, height: 185, borderRadius: 18,
     overflow: 'hidden', backgroundColor: '#160c03',
@@ -765,6 +854,12 @@ const s = StyleSheet.create({
     borderRadius: 99, paddingHorizontal: 8, paddingVertical: 4,
   },
   recipeTimeText: { fontSize: 11, color: '#fff', fontWeight: '600' },
+  recipeMatchBadge: {
+    position: 'absolute', top: 13, left: 13,
+    borderRadius: 99, paddingHorizontal: 7, paddingVertical: 3,
+    borderWidth: 0.5,
+  },
+  recipeMatchText: { fontSize: 10, fontWeight: '700' },
   recipeTags:     { flexDirection: 'row', gap: 5, flexWrap: 'wrap' },
   recipeTag: {
     backgroundColor: 'rgba(255,255,255,0.14)',
