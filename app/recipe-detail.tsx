@@ -1,5 +1,6 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { router, useLocalSearchParams } from 'expo-router';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -22,10 +23,33 @@ export default function RecipeDetailScreen() {
   const insets = useSafeAreaInsets();
   const { items: inventoryItems } = useInventory();
   const [nutritionExpanded, setNutritionExpanded] = useState(false);
+  const [isSaved, setIsSaved] = useState(false);
   if (!data) return null;
 
   const recipe: RecipeSuggestion = JSON.parse(data as string);
   const bgColor = RECIPE_BG_COLORS[(parseInt(ci ?? '0', 10)) % RECIPE_BG_COLORS.length];
+
+  useEffect(() => {
+    AsyncStorage.getItem('saved_recipes').then(raw => {
+      const saved: RecipeSuggestion[] = raw ? JSON.parse(raw) : [];
+      setIsSaved(saved.some(r => r.name === recipe.name));
+    });
+  }, [recipe.name]);
+
+  async function toggleSave() {
+    const raw = await AsyncStorage.getItem('saved_recipes');
+    const saved: RecipeSuggestion[] = raw ? JSON.parse(raw) : [];
+    let updated: RecipeSuggestion[];
+    if (isSaved) {
+      updated = saved.filter(r => r.name !== recipe.name);
+    } else {
+      updated = saved.some(r => r.name === recipe.name)
+        ? saved
+        : [...saved, recipe];
+    }
+    await AsyncStorage.setItem('saved_recipes', JSON.stringify(updated));
+    setIsSaved(!isSaved);
+  }
   const { matchPct, missing: missingCount } = calcInventoryMatch(recipe.ingredients, inventoryItems);
   const matchC = matchBadgeColor(matchPct);
 
@@ -151,11 +175,13 @@ export default function RecipeDetailScreen() {
       <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 16) }]}>
             <>
             <TouchableOpacity
-              style={styles.saveBtn}
-              onPress={() => router.back()}
+              style={[styles.saveBtn, isSaved && styles.saveBtnSaved]}
+              onPress={toggleSave}
               activeOpacity={0.8}
             >
-              <Text style={styles.saveBtnText}>Speichern</Text>
+              <Text style={[styles.saveBtnText, isSaved && styles.saveBtnSavedText]}>
+                {isSaved ? 'Gespeichert ✓' : 'Speichern'}
+              </Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={styles.cookBtn}
@@ -464,10 +490,17 @@ const styles = StyleSheet.create({
     borderColor: '#2a2a2a',
     alignItems: 'center',
   },
+  saveBtnSaved: {
+    backgroundColor: 'rgba(38,222,129,0.12)',
+    borderColor: 'rgba(38,222,129,0.35)',
+  },
   saveBtnText: {
     fontSize: 15,
     fontWeight: '700',
     color: 'rgba(255,255,255,0.6)',
+  },
+  saveBtnSavedText: {
+    color: '#26de81',
   },
   cookBtn: {
     flex: 2,

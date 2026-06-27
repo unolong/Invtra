@@ -1,8 +1,9 @@
 import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { router } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Animated,
   ActivityIndicator,
   Alert,
   Image,
@@ -15,7 +16,9 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import { PinchGestureHandler, State } from 'react-native-gesture-handler';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import Svg, { Line } from 'react-native-svg';
 
 import { useInventory } from '@/context/inventory-context';
 import { capturedPhoto } from '@/lib/captured-photo';
@@ -61,6 +64,63 @@ type CheckedItem = InventoryPhotoItem & {
   expiresAt?: string | null;
   isManual?: boolean;
 };
+
+type TagGroup = {
+  id: string;
+  items: CheckedItem[];
+  cx: number;    // display position x% (clamped)
+  cy: number;    // display position y% (clamped)
+  rawCx: number; // actual bounding box center x%
+  rawCy: number; // actual bounding box center y%
+};
+
+function groupTagsByProximity(items: CheckedItem[], threshold = 8): TagGroup[] {
+  const withBB = items.filter(i => !i.isManual && i.boundingBox);
+
+  if (withBB.length === 0) {
+    return items.filter(i => !i.isManual).slice(0, 5).map((item, i) => {
+      const rawCx = 10 + (i % 3) * 28;
+      const rawCy = 14 + i * 15;
+      return { id: item.id, items: [item], cx: rawCx, cy: rawCy, rawCx, rawCy };
+    });
+  }
+
+  const assigned = new Set<string>();
+  const groups: TagGroup[] = [];
+
+  for (const item of withBB) {
+    if (assigned.has(item.id)) continue;
+    const group: CheckedItem[] = [item];
+    assigned.add(item.id);
+
+    const ax = item.boundingBox!.x + item.boundingBox!.width / 2;
+    const ay = item.boundingBox!.y + item.boundingBox!.height / 2;
+
+    for (const other of withBB) {
+      if (assigned.has(other.id)) continue;
+      const bx = other.boundingBox!.x + other.boundingBox!.width / 2;
+      const by = other.boundingBox!.y + other.boundingBox!.height / 2;
+      if (Math.sqrt((bx - ax) ** 2 + (by - ay) ** 2) < threshold) {
+        group.push(other);
+        assigned.add(other.id);
+      }
+    }
+
+    const rawCx = group.reduce((s, gi) => s + gi.boundingBox!.x + gi.boundingBox!.width / 2, 0) / group.length;
+    const rawCy = group.reduce((s, gi) => s + gi.boundingBox!.y + gi.boundingBox!.height / 2, 0) / group.length;
+
+    groups.push({
+      id: item.id,
+      items: group,
+      cx: Math.max(3, Math.min(74, rawCx)),
+      cy: Math.max(3, Math.min(87, rawCy)),
+      rawCx,
+      rawCy,
+    });
+  }
+
+  return groups;
+}
 
 function confColor(conf: number): string {
   if (conf >= 0.9)  return '#26de81';
@@ -112,6 +172,10 @@ export default function AiInventoryScreen() {
   const [error, setError]       = useState<string | null>(null);
   const [items, setItems]       = useState<CheckedItem[]>([]);
 
+  // Overlay & fullscreen state
+  const [openGroupId, setOpenGroupId]         = useState<string | null>(null);
+  const [fullscreenOpen, setFullscreenOpen]   = useState(false);
+
   // Inline edit state
   const [editingId, setEditingId]             = useState<string | null>(null);
   const [editQuantityStr, setEditQuantityStr] = useState('');
@@ -121,7 +185,10 @@ export default function AiInventoryScreen() {
   const [editAiLoading, setEditAiLoading]     = useState(false);
   const [editDraftDate, setEditDraftDate]     = useState<string | null>(null);
   const [editShowPicker, setEditPicker]       = useState(false);
+  const [editName, setEditName]               = useState('');
   const fetchRef = useRef(0);
+
+  const tagGroups = useMemo(() => groupTagsByProximity(items), [items]);
 
   // Add item modal state
   const [showAddModal, setShowAddModal]         = useState(false);
@@ -173,6 +240,7 @@ export default function AiInventoryScreen() {
   const openEdit = (item: CheckedItem) => {
     if (editingId === item.id) { setEditingId(null); return; }
     setEditingId(item.id);
+    setEditName(item.name);
     setEditQuantityStr(String(item.editedQuantity ?? item.quantity));
     setEditUnit((item.editedUnit ?? item.unit) as EditUnit);
     setEditMode('ai');
@@ -207,7 +275,7 @@ export default function AiInventoryScreen() {
     else if (editExpiryMode === 'manual' && editDraftDate) expiresAt = editDraftDate;
     setItems(prev => prev.map(i =>
       i.id === editingId
-        ? { ...i, editedQuantity: newQty, editedUnit: editUnit, manuallyEdited: true, expiresAt }
+        ? { ...i, name: editName.trim() || i.name, editedQuantity: newQty, editedUnit: editUnit, manuallyEdited: true, expiresAt }
         : i,
     ));
     setEditingId(null);
@@ -304,25 +372,109 @@ export default function AiInventoryScreen() {
       {/* Photo */}
       {!!photo.uri && !photo.uri.startsWith('barcode:') && (
         <View style={styles.photoWrapper}>
-          <Image source={{ uri: photo.uri }} style={styles.photo} resizeMode="cover" />
+          <Image source={{ uri: photo.uri }} style={styles.photo} resizeMode="contain" />
+
+          {/* Tap-to-fullscreen overlay (below tags so tags stay interactive) */}
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => {
+              if (openGroupId !== null) { setOpenGroupId(null); return; }
+              setFullscreenOpen(true);
+            }}
+          />
+
           {loading && (
             <View style={styles.photoOverlay}>
               <ActivityIndicator color={ACCENT} size="large" />
               <Text style={styles.photoOverlayText}>Inhalt wird erkannt…</Text>
             </View>
           )}
-          {!loading && items.filter(i => !i.isManual).slice(0, 5).map((item, i) => {
-            const color = CAT_COLOR[item.category] ?? ACCENT;
-            return (
-              <View
-                key={item.id}
-                style={[styles.segLabel, { top: `${14 + i * 15}%`, left: `${10 + (i % 3) * 28}%`, backgroundColor: color } as any]}
-              >
-                <Text style={styles.segLabelText} numberOfLines={1}>{item.name}</Text>
-              </View>
-            );
-          })}
+
+          {!loading && (
+            <>
+              {/* SVG connector lines (clamped position → actual bounding box center) */}
+              <Svg style={StyleSheet.absoluteFill} pointerEvents="none">
+                {tagGroups.map(group => {
+                  if (group.items.length !== 1) return null;
+                  const dx = Math.abs(group.cx - group.rawCx);
+                  const dy = Math.abs(group.cy - group.rawCy);
+                  if (dx < 2 && dy < 2) return null;
+                  return (
+                    <Line
+                      key={group.id}
+                      x1={`${group.cx}%`} y1={`${group.cy}%`}
+                      x2={`${group.rawCx}%`} y2={`${group.rawCy}%`}
+                      stroke={ACCENT} strokeWidth={1} opacity={0.6}
+                    />
+                  );
+                })}
+              </Svg>
+
+              {/* Tag labels */}
+              {tagGroups.map(group => {
+                const isItemActive = group.items.some(i => i.id === editingId);
+                const isDimmed = editingId !== null && !isItemActive;
+                const isGroup = group.items.length > 1;
+                const isGroupOpen = openGroupId === group.id;
+                const color = isGroup ? '#2a2a2a' : (CAT_COLOR[group.items[0].category] ?? ACCENT);
+                const bgColor = isItemActive ? ACCENT : color;
+                const textColor = isItemActive ? '#0a0a0a' : (isGroup ? '#f0f0f0' : '#000');
+                const activeItem = group.items.find(i => i.id === editingId);
+
+                return (
+                  <View
+                    key={group.id}
+                    style={[
+                      styles.segLabel,
+                      {
+                        top: `${group.cy}%`,
+                        left: `${group.cx}%`,
+                        backgroundColor: bgColor,
+                        borderWidth: isItemActive ? 2 : isGroupOpen ? 1 : 0,
+                        borderColor: ACCENT,
+                        opacity: isDimmed ? 0.4 : 1,
+                      } as any,
+                    ]}
+                  >
+                    <TouchableOpacity
+                      onPress={() => isGroup ? setOpenGroupId(isGroupOpen ? null : group.id) : undefined}
+                      activeOpacity={isGroup ? 0.8 : 1}
+                    >
+                      <Text style={[styles.segLabelText, { color: textColor }]} numberOfLines={1}>
+                        {activeItem ? editName :
+                         isGroup ? `${group.items.length} Produkte ▾` :
+                         group.items[0].name}
+                      </Text>
+                    </TouchableOpacity>
+
+                    {isGroup && isGroupOpen && (
+                      <View style={styles.groupDropdown}>
+                        {group.items.map((gItem, gIdx) => (
+                          <TouchableOpacity
+                            key={gItem.id}
+                            style={[
+                              styles.groupDropdownItem,
+                              gIdx < group.items.length - 1 && styles.groupDropdownDivider,
+                            ]}
+                            onPress={() => { openEdit(gItem); setOpenGroupId(null); }}
+                          >
+                            <Text style={styles.groupDropdownText}>{gItem.name}</Text>
+                          </TouchableOpacity>
+                        ))}
+                      </View>
+                    )}
+                  </View>
+                );
+              })}
+            </>
+          )}
         </View>
+      )}
+
+      {/* Fullscreen photo modal */}
+      {fullscreenOpen && !!photo.uri && (
+        <FullscreenPhotoModal uri={photo.uri} onClose={() => setFullscreenOpen(false)} />
       )}
 
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
@@ -369,8 +521,8 @@ export default function AiInventoryScreen() {
                       </View>
 
                       <View style={{ flex: 1, minWidth: 0 }}>
-                        <Text style={[styles.itemName, !item.checked && styles.faded]} numberOfLines={1}>
-                          {item.name}
+                        <Text style={[styles.itemName, !item.checked && styles.faded]}>
+                          {isEditing ? editName : item.name}
                         </Text>
                         <Text style={styles.itemSub} numberOfLines={1}>
                           {formatQty(item)}
@@ -397,6 +549,19 @@ export default function AiInventoryScreen() {
 
                     {isEditing && (
                       <View style={styles.editPanel}>
+                        {/* Name */}
+                        <View style={styles.editField}>
+                          <Text style={styles.editFieldLabel}>NAME</Text>
+                          <TextInput
+                            style={styles.nameEditInput}
+                            value={editName}
+                            onChangeText={setEditName}
+                            returnKeyType="done"
+                            autoCorrect={false}
+                            selectTextOnFocus
+                          />
+                        </View>
+
                         {/* Qty + Unit */}
                         <View style={styles.editField}>
                           <Text style={styles.editFieldLabel}>MENGE</Text>
@@ -755,6 +920,72 @@ export default function AiInventoryScreen() {
   );
 }
 
+// ─── Fullscreen Photo Modal ────────────────────────────────────
+
+function FullscreenPhotoModal({ uri, onClose }: { uri: string; onClose: () => void }) {
+  const pinchScale = useRef(new Animated.Value(1)).current;
+  const baseScale  = useRef(new Animated.Value(1)).current;
+  const lastScale  = useRef(1);
+  const compositeScale = Animated.multiply(pinchScale, baseScale);
+
+  const onPinchGesture = Animated.event(
+    [{ nativeEvent: { scale: pinchScale } }],
+    { useNativeDriver: true },
+  );
+
+  const onPinchStateChange = ({ nativeEvent }: any) => {
+    if (nativeEvent.oldState === State.ACTIVE) {
+      const next = Math.max(1, Math.min(5, lastScale.current * nativeEvent.scale));
+      lastScale.current = next;
+      baseScale.setValue(next);
+      pinchScale.setValue(1);
+    }
+  };
+
+  return (
+    <Modal visible animationType="fade" statusBarTranslucent transparent={false}>
+      <View style={fsStyles.container}>
+        <PinchGestureHandler
+          onGestureEvent={onPinchGesture}
+          onHandlerStateChange={onPinchStateChange}
+        >
+          <Animated.View style={[fsStyles.imgWrap, { transform: [{ scale: compositeScale }] }]}>
+            <Image source={{ uri }} style={fsStyles.img} resizeMode="contain" />
+          </Animated.View>
+        </PinchGestureHandler>
+
+        <SafeAreaView style={fsStyles.topBar} edges={['top']}>
+          <TouchableOpacity style={fsStyles.closeBtn} onPress={onClose} hitSlop={12}>
+            <Text style={fsStyles.closeBtnText}>✕</Text>
+          </TouchableOpacity>
+        </SafeAreaView>
+
+        <View style={fsStyles.hintBar}>
+          <Text style={fsStyles.hintText}>Zusammenkneifen zum Zoomen</Text>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+const fsStyles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: '#000', justifyContent: 'center' },
+  imgWrap:   { flex: 1 },
+  img:       { flex: 1, width: '100%', height: '100%' },
+  topBar:    { position: 'absolute', top: 0, left: 0, right: 0, paddingHorizontal: 16 },
+  closeBtn: {
+    alignSelf: 'flex-end', marginTop: 12,
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: 'rgba(0,0,0,0.55)', borderWidth: 0.5, borderColor: 'rgba(255,255,255,0.2)',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  closeBtnText: { fontSize: 16, color: '#fff', fontWeight: '700' },
+  hintBar: { position: 'absolute', bottom: 32, left: 0, right: 0, alignItems: 'center' },
+  hintText: { fontSize: 12, color: 'rgba(255,255,255,0.35)', fontWeight: '500' },
+});
+
+// ─── Styles ───────────────────────────────────────────────────
+
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#0a0a0a' },
 
@@ -773,8 +1004,18 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.65)', alignItems: 'center', justifyContent: 'center', gap: 12,
   },
   photoOverlayText: { color: '#fff', fontSize: 14, fontWeight: '500' },
-  segLabel: { position: 'absolute', paddingHorizontal: 7, paddingVertical: 3, borderRadius: 8, maxWidth: 100 },
+  segLabel: { position: 'absolute', paddingHorizontal: 7, paddingVertical: 3, borderRadius: 8, maxWidth: 120 },
   segLabelText: { fontSize: 10, color: '#000', fontWeight: '700' },
+  groupDropdown: {
+    position: 'absolute', top: '100%', left: 0,
+    backgroundColor: '#1a1a1a', borderRadius: 8,
+    borderWidth: 0.5, borderColor: '#333',
+    minWidth: 130, marginTop: 3, zIndex: 99,
+    overflow: 'hidden',
+  },
+  groupDropdownItem: { paddingHorizontal: 10, paddingVertical: 8 },
+  groupDropdownDivider: { borderBottomWidth: 0.5, borderBottomColor: '#2a2a2a' },
+  groupDropdownText: { fontSize: 11, color: '#f0f0f0', fontWeight: '600' },
 
   scroll: { padding: 16, paddingBottom: 120, gap: 12 },
 
@@ -797,11 +1038,12 @@ const styles = StyleSheet.create({
   countBadgeText: { fontSize: 10, color: 'rgba(255,255,255,0.45)', fontWeight: '600' },
 
   card: { backgroundColor: '#111111', borderRadius: 18, borderWidth: 0.5, borderColor: '#222222', overflow: 'hidden' },
-  itemRow: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 12, paddingHorizontal: 14 },
+  itemRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 12, paddingVertical: 12, paddingHorizontal: 14 },
   itemRowBorder: { height: 0.5, backgroundColor: '#1a1a1a', marginHorizontal: 14 },
   checkbox: {
     width: 22, height: 22, borderRadius: 7, borderWidth: 1.5,
     borderColor: 'rgba(255,255,255,0.2)', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+    marginTop: 1,
   },
   checkmark: { fontSize: 11, color: '#000', fontWeight: '800' },
   glyph: { width: 34, height: 34, borderRadius: 10, borderWidth: 0.5, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
@@ -812,7 +1054,7 @@ const styles = StyleSheet.create({
 
   editBtn: {
     width: 30, height: 30, borderRadius: 8, backgroundColor: 'rgba(255,255,255,0.06)',
-    alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+    alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 2,
   },
   editBtnActive: { backgroundColor: `${ACCENT}20` },
   editBtnIcon: { fontSize: 16, color: 'rgba(255,255,255,0.45)' },
@@ -821,6 +1063,16 @@ const styles = StyleSheet.create({
   editPanel: {
     backgroundColor: '#181818', borderTopWidth: 0.5, borderTopColor: '#222222',
     paddingHorizontal: 14, paddingVertical: 14, gap: 14,
+  },
+  nameEditInput: {
+    backgroundColor: '#111111',
+    borderRadius: 8,
+    borderWidth: 0.5,
+    borderColor: '#222222',
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    fontSize: 14,
+    color: '#f0f0f0',
   },
   editField: { gap: 8 },
   editFieldLabel: {

@@ -26,14 +26,13 @@ const RECIPE_BG_COLORS = [
   '#281a38',
 ];
 
-type Filter = 'alle' | 'inventar' | 'schnell' | 'vegetarisch' | 'highprotein';
+type Filter = 'alle' | 'inventar' | 'schnell' | 'gespeichert';
 
 const FILTERS: { key: Filter; label: string }[] = [
   { key: 'alle', label: 'Alle' },
   { key: 'inventar', label: 'Inventar-Match' },
   { key: 'schnell', label: '< 15 Min.' },
-  { key: 'vegetarisch', label: 'Vegetarisch' },
-  { key: 'highprotein', label: 'Highprotein' },
+  { key: 'gespeichert', label: 'Gespeichert' },
 ];
 
 export default function CookScreen() {
@@ -49,6 +48,7 @@ export default function CookScreen() {
 
   const [filter, setFilter] = useState<Filter>('alle');
   const [recipes, setRecipes] = useState<RecipeSuggestion[]>([]);
+  const [savedRecipes, setSavedRecipes] = useState<RecipeSuggestion[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const loadingRef = useRef(false);
@@ -106,6 +106,14 @@ export default function CookScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Exactly once on mount
 
+  // Load saved recipes whenever 'gespeichert' filter is active
+  useEffect(() => {
+    if (filter !== 'gespeichert') return;
+    AsyncStorage.getItem('saved_recipes').then(raw => {
+      setSavedRecipes(raw ? JSON.parse(raw) : []);
+    });
+  }, [filter]);
+
   // Manual reload (refresh button, retry button) — always fetches fresh
   const loadRecipes = useCallback(async () => {
     if (loadingRef.current) return;
@@ -129,16 +137,15 @@ export default function CookScreen() {
   }, [inventoryItems, remaining]);
 
   const filtered = useMemo(() => {
+    if (filter === 'gespeichert') return savedRecipes;
     const getMatch = (r: RecipeSuggestion) => calcInventoryMatch(r.ingredients, inventoryItems).matchPct;
-    const base = recipes.filter(r => getMatch(r) >= 50); // hide < 50% match
+    const sorted = [...recipes].sort((a, b) => getMatch(b) - getMatch(a));
     switch (filter) {
-      case 'inventar':    return base.filter(r => getMatch(r) >= 100);
-      case 'schnell':     return base.filter(r => r.prepTime <= 15);
-      case 'vegetarisch': return base.filter(r => r.vegetarian);
-      case 'highprotein': return base.filter(r => r.protein >= 30);
-      default:            return base;
+      case 'inventar': return sorted.filter(r => getMatch(r) >= 80);
+      case 'schnell':  return sorted.filter(r => r.prepTime < 15);
+      default:         return sorted;
     }
-  }, [recipes, filter, inventoryItems]);
+  }, [recipes, filter, inventoryItems, savedRecipes]);
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -227,7 +234,14 @@ export default function CookScreen() {
           </View>
         ) : filtered.length === 0 ? (
           <View style={styles.stateCard}>
-            <Text style={styles.stateText}>Kein Rezept passt zu diesem Filter.</Text>
+            <Text style={{ fontSize: 40, textAlign: 'center' }}>
+              {filter === 'gespeichert' ? '🔖' : '🥦'}
+            </Text>
+            <Text style={styles.stateText}>
+              {filter === 'gespeichert'
+                ? 'Noch keine Rezepte gespeichert'
+                : 'Kein Rezept passt zu diesem Filter.'}
+            </Text>
             <TouchableOpacity style={styles.ghostBtn} onPress={() => setFilter('alle')}>
               <Text style={styles.ghostBtnText}>Alle Rezepte zeigen</Text>
             </TouchableOpacity>

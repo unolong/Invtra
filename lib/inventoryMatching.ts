@@ -1,5 +1,6 @@
 import type { InventoryItem } from '@/context/inventory-context';
 import type { RecipeSuggestion } from '@/services/anthropic';
+import { isBasicIngredient } from '@/lib/recipe-match';
 
 export interface InventoryMatch {
   inventoryItem: InventoryItem;
@@ -71,6 +72,7 @@ export function findRecipeInventoryMatches(
   const usedIds = new Set<string>();
 
   for (const usedName of recipe.usedInventoryItems) {
+    if (isBasicIngredient(usedName.toLowerCase())) continue;
     for (const item of inventoryItems) {
       if (usedIds.has(item.id)) continue;
       if (namesMatch(usedName, item.name)) {

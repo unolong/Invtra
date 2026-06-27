@@ -54,7 +54,9 @@ export type RecipeSuggestion = {
   sugar?: number;
   ingredients: string[];
   steps: string[];
-  inventoryMatch?: number;
+  matchPercent?: number;        // 0-100, AI-estimated
+  missingIngredients?: string[];
+  inventoryMatch?: number;      // legacy decimal kept for compat
   usedInventoryItems: string[];
   vegetarian: boolean;
 };
@@ -69,12 +71,23 @@ export async function getRecipeSuggestions(
     ? topItems.map(i => i.name).join(', ')
     : 'leer';
 
-  const prompt = `Erstelle 4 Rezepte. Restmakros: ${Math.round(remaining.calories)}kcal, ${Math.round(remaining.protein)}g P, ${Math.round(remaining.carbs)}g C, ${Math.round(remaining.fat)}g F.
-Inventar (max 20): ${inventoryList}
-Stile: schnell, proteinreich, vegetarisch, saisonal. Inventar bevorzugen.
-inventoryMatch: Dezimalzahl 0.0–1.0 (nicht Prozent). usedInventoryItems: nur Inventar-Zutaten die im Rezept verwendet werden.
+  const prompt = `Erstelle GENAU 8 Rezepte mit bewusst unterschiedlichem Inventar-Match.
+
+PFLICHT-VERTEILUNG (strikt einhalten):
+- Mind. 2 Rezepte mit matchPercent = 100 (alle Hauptzutaten im Inventar vorhanden)
+- Mind. 2 Rezepte mit matchPercent 60–99 (1–2 Zutaten fehlen, in missingIngredients nennen)
+- Mind. 2 Rezepte mit matchPercent unter 60 (mehrere Zutaten fehlen)
+- Mind. 2 Rezepte mit prepTime über 15 Minuten
+
+Restmakros heute: ${Math.round(remaining.calories)}kcal, ${Math.round(remaining.protein)}g P, ${Math.round(remaining.carbs)}g C, ${Math.round(remaining.fat)}g F
+Inventar (max 20 Artikel): ${inventoryList}
+
+matchPercent: ganze Zahl 0–100. missingIngredients: fehlende Hauptzutaten (leer wenn 100%).
+usedInventoryItems: nur Inventar-Artikel die tatsächlich im Rezept verwendet werden.
+Abwechslungsreiche Stile: schnell, vegetarisch, proteinreich, saisonal, klassisch.
+
 Antworte NUR mit JSON:
-{"recipes":[{"name":"","description":"","prepTime":0,"difficulty":"einfach","calories":0,"protein":0,"carbs":0,"fat":0,"ingredients":[""],"steps":[""],"inventoryMatch":0.85,"usedInventoryItems":[""],"vegetarian":false}]}`;
+{"recipes":[{"name":"","description":"","prepTime":0,"difficulty":"einfach","calories":0,"protein":0,"carbs":0,"fat":0,"ingredients":[""],"steps":[""],"matchPercent":85,"missingIngredients":[],"usedInventoryItems":[""],"vegetarian":false}]}`;
 
   let rawText = '';
   try {
@@ -100,6 +113,13 @@ Antworte NUR mit JSON:
 
 // ─── Vision: Inventory scan ────────────────────────────────────
 
+export type BoundingBox = {
+  x: number;      // top-left x, 0-100 percent of image width
+  y: number;      // top-left y, 0-100 percent of image height
+  width: number;  // percent of image width
+  height: number; // percent of image height
+};
+
 export type InventoryPhotoItem = {
   name: string;
   quantity: number;
@@ -107,27 +127,38 @@ export type InventoryPhotoItem = {
   originalDescription: string;
   category: string;
   confidence: number;
+  boundingBox?: BoundingBox;
 };
 
 export async function analyzeInventoryPhoto(
   base64: string,
 ): Promise<InventoryPhotoItem[]> {
-  const prompt = `Erkenne Lebensmittel im Kühlschrank-Foto. Berechne Gesamtmenge (2×200g=400g).
+  const prompt = `Erkenne alle sichtbaren Lebensmittel im Kühlschrank-Foto. Berechne Gesamtmenge (2×200g=400g).
 Antworte NUR mit JSON:
-{"items":[{"name":"","quantity":0,"unit":"g","originalDescription":"","category":"protein","confidence":0}]}
-unit: "g"|"ml"|"Stück". category: protein|carbs|gemüse|obst|milch|fett|sonstiges.`;
+{"items":[{"name":"","quantity":0,"unit":"g","originalDescription":"","category":"protein","confidence":0,"boundingBox":{"x":10,"y":20,"width":15,"height":25}}]}
+unit: "g"|"ml"|"Stück". category: protein|carbs|gemüse|obst|milch|fett|sonstiges.
+boundingBox: Prozentwerte 0-100 relativ zur Bildgröße. x,y=obere linke Ecke (Prozent). width,height=Breite/Höhe (Prozent).
+Schätze boundingBox so präzise wie möglich für jedes erkannte Produkt.`;
 
   const text = cleanJson(await callGeminiWithImage(base64, prompt));
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   const parsed = JSON.parse(jsonMatch?.[0] ?? '{}');
-  return (parsed.items ?? []).map((item: any) => ({
-    name: item.name ?? '',
-    quantity: Math.max(1, Math.round(Number(item.quantity) || 1)),
-    unit: (['g', 'ml', 'Stück'].includes(item.unit) ? item.unit : 'g') as 'g' | 'ml' | 'Stück',
-    originalDescription: item.originalDescription ?? '',
-    category: item.category ?? 'sonstiges',
-    confidence: Number(item.confidence) || 0,
-  }));
+  return (parsed.items ?? []).map((item: any) => {
+    const bb = item.boundingBox;
+    const boundingBox: BoundingBox | undefined =
+      bb && typeof bb.x === 'number' && typeof bb.y === 'number'
+        ? { x: bb.x, y: bb.y, width: bb.width ?? 20, height: bb.height ?? 20 }
+        : undefined;
+    return {
+      name: item.name ?? '',
+      quantity: Math.max(1, Math.round(Number(item.quantity) || 1)),
+      unit: (['g', 'ml', 'Stück'].includes(item.unit) ? item.unit : 'g') as 'g' | 'ml' | 'Stück',
+      originalDescription: item.originalDescription ?? '',
+      category: item.category ?? 'sonstiges',
+      confidence: Number(item.confidence) || 0,
+      boundingBox,
+    };
+  });
 }
 
 // ─── AI Shelf Life Estimation ──────────────────────────────────

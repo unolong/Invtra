@@ -5,10 +5,13 @@ export function matchBadgeColor(pct: number): string {
 }
 
 const BASIC_INGREDIENTS = [
-  'salz', 'pfeffer', 'öl', 'olivenöl', 'butter',
-  'wasser', 'essig', 'zucker', 'mehl',
-  'knoblauch', 'zwiebel', 'gewürz', 'gewürze',
-  'optional', 'nach geschmack', 'etwas', 'prise',
+  'salz', 'pfeffer', 'öl', 'olivenöl', 'sonnenblumenöl', 'rapsöl',
+  'butter', 'zucker', 'mehl', 'wasser', 'essig', 'senf',
+  'knoblauch', 'zwiebel', 'paprikapulver', 'oregano', 'basilikum',
+  'thymian', 'rosmarin', 'zimt', 'muskat', 'curry', 'kurkuma',
+  'chilipulver', 'cayennepfeffer', 'backpulver', 'natron',
+  'speiseöl', 'pflanzenöl', 'margarine',
+  'gewürz', 'gewürze', 'optional', 'nach geschmack', 'etwas', 'prise',
 ];
 
 export function isBasicIngredient(ingredient: string): boolean {

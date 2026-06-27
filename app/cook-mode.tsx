@@ -1,5 +1,8 @@
 import { router, useLocalSearchParams } from 'expo-router';
+import * as Haptics from 'expo-haptics';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import * as Notifications from 'expo-notifications';
+import { Audio } from 'expo-av';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
@@ -22,6 +25,7 @@ import {
   findRecipeInventoryMatches,
   type InventoryMatch,
 } from '@/lib/inventoryMatching';
+import { isBasicIngredient } from '@/lib/recipe-match';
 import type { RecipeSuggestion } from '@/services/anthropic';
 
 // ─── Constants ────────────────────────────────────────────────
@@ -126,6 +130,10 @@ export default function CookModeScreen() {
   const [timerLeft, setTimerLeft] = useState<number | null>(null);
   const [timerRunning, setTimerRunning] = useState(false);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timerCompletedRef = useRef(false);
+
+  // Flash animation
+  const flashOpacity = useRef(new Animated.Value(0)).current;
 
   // Keep awake
   useEffect(() => {
@@ -164,7 +172,57 @@ export default function CookModeScreen() {
     setTimerTotal(secs);
     setTimerLeft(secs);
     setTimerRunning(false);
+    timerCompletedRef.current = false;
   }, [stepIndex, phase]);
+
+  // Timer reached 0 → fire completion effects
+  useEffect(() => {
+    if (timerLeft === 0 && timerTotal !== null && timerTotal > 0 && !timerCompletedRef.current) {
+      timerCompletedRef.current = true;
+      handleTimerComplete();
+    }
+  }, [timerLeft, timerTotal]);
+
+  async function handleTimerComplete() {
+    // 1. Haptic feedback (3 pulses)
+    await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    setTimeout(() => Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning), 500);
+    setTimeout(() => Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning), 1000);
+
+    // 2. Screen flash (3x blink)
+    Animated.sequence([
+      Animated.timing(flashOpacity, { toValue: 1, duration: 100, useNativeDriver: true }),
+      Animated.timing(flashOpacity, { toValue: 0, duration: 200, useNativeDriver: true }),
+      Animated.timing(flashOpacity, { toValue: 1, duration: 100, useNativeDriver: true }),
+      Animated.timing(flashOpacity, { toValue: 0, duration: 200, useNativeDriver: true }),
+      Animated.timing(flashOpacity, { toValue: 1, duration: 100, useNativeDriver: true }),
+      Animated.timing(flashOpacity, { toValue: 0, duration: 300, useNativeDriver: true }),
+    ]).start();
+
+    // 3. Sound
+    try {
+      const { sound } = await Audio.Sound.createAsync(
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        require('../assets/timer-done.mp3'),
+      );
+      await sound.playAsync();
+      sound.setOnPlaybackStatusUpdate(status => {
+        if (status.isLoaded && status.didJustFinish) sound.unloadAsync();
+      });
+    } catch {
+      // sound file not found – skip silently
+    }
+
+    // 4. Push notification (works with screen off / app in background)
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: 'Timer abgelaufen ⏱',
+        body: `${recipe.name} – Schritt ${stepIndex + 1} ist fertig!`,
+        sound: true,
+      },
+      trigger: null,
+    });
+  }
 
   // Swipe gesture
   const panResponder = useMemo(
@@ -179,8 +237,11 @@ export default function CookModeScreen() {
     [stepIndex, recipe.steps],
   );
 
-  const isPresent = (ing: string) =>
-    recipe.usedInventoryItems?.some(i => ing.toLowerCase().includes(i.toLowerCase()));
+  const isPresent = (ing: string) => {
+    const lower = ing.toLowerCase().trim();
+    if (isBasicIngredient(lower)) return true;
+    return recipe.usedInventoryItems?.some(i => lower.includes(i.toLowerCase()));
+  };
 
   const missingCount = recipe.ingredients?.filter(i => !isPresent(i)).length ?? 0;
   const allPresent = missingCount === 0;
@@ -293,6 +354,12 @@ export default function CookModeScreen() {
           setShowDeductModal(false);
           router.dismissAll();
         }}
+      />
+
+      {/* Timer-complete flash overlay */}
+      <Animated.View
+        style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(255,255,255,0.3)', opacity: flashOpacity, zIndex: 50 }]}
+        pointerEvents="none"
       />
     </View>
   );
@@ -422,14 +489,15 @@ function CookingScreen({
         </View>
       </View>
 
-      {/* Step content */}
-      <View style={styles.cookContent} {...panHandlers}>
-        <Text style={styles.cookStepNumber}>{stepNum}</Text>
-        <Text style={styles.cookStepText}>{currentStep}</Text>
-
-        {/* Timer */}
+      <ScrollView
+        style={{ flex: 1 }}
+        contentContainerStyle={styles.cookScrollContent}
+        showsVerticalScrollIndicator={false}
+        {...panHandlers}
+      >
+        {/* Timer – immer sichtbar direkt unter dem Header */}
         {timerTotal !== null && timerLeft !== null && (
-          <View style={styles.timerContainer}>
+          <View style={styles.timerSection}>
             <CircleTimer
               total={timerTotal}
               left={timerLeft}
@@ -442,13 +510,16 @@ function CookingScreen({
             </TouchableOpacity>
           </View>
         )}
-      </View>
+
+        {/* Step content */}
+        <View style={styles.cookContent}>
+          <Text style={styles.cookStepNumber}>{stepNum}</Text>
+          <Text style={styles.cookStepText}>{currentStep}</Text>
+        </View>
+      </ScrollView>
 
       {/* Bottom nav */}
       <View style={[styles.cookNav, { paddingBottom: Math.max(insets.bottom, 16) }]}>
-        <TouchableOpacity style={styles.cookNavMic} hitSlop={8}>
-          <Text style={styles.cookNavMicText}>🎤</Text>
-        </TouchableOpacity>
         <TouchableOpacity
           style={[styles.cookNavBack, stepIndex === 0 && styles.cookNavBackDisabled]}
           onPress={onPrev}
@@ -515,8 +586,8 @@ function CookingScreen({
 // ─── Circle Timer ─────────────────────────────────────────────
 
 function CircleTimer({ total, left, running }: { total: number; left: number; running: boolean }) {
-  const R = 70;
-  const STROKE = 6;
+  const R = 52;
+  const STROKE = 5;
   const SIZE = (R + STROKE) * 2;
   const circumference = 2 * Math.PI * R;
   const progress = total > 0 ? left / total : 0;
@@ -836,31 +907,36 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   iconBtnText: { fontSize: 16, color: 'rgba(255,255,255,0.6)' },
+  cookScrollContent: {
+    paddingBottom: 8,
+  },
   cookContent: {
-    flex: 1,
     paddingHorizontal: 24,
-    paddingTop: 32,
-    gap: 20,
+    paddingTop: 16,
+    gap: 10,
   },
   cookStepNumber: {
-    fontSize: 80,
+    fontSize: 72,
     fontWeight: '800',
     color: ACCENT,
     letterSpacing: -4,
-    lineHeight: 84,
+    lineHeight: 76,
     opacity: 0.85,
   },
   cookStepText: {
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: '600',
     color: '#fff',
-    lineHeight: 32,
+    lineHeight: 28,
     letterSpacing: -0.4,
   },
-  timerContainer: {
+  timerSection: {
     alignItems: 'center',
-    marginTop: 12,
-    gap: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+    gap: 10,
+    borderBottomWidth: 0.5,
+    borderBottomColor: '#1a1a1a',
   },
   timerCircleWrap: {
     position: 'relative',
@@ -868,7 +944,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   timerTime: {
-    fontSize: 28,
+    fontSize: 22,
     fontWeight: '800',
     color: ACCENT,
     letterSpacing: -1,
@@ -900,17 +976,6 @@ const styles = StyleSheet.create({
     borderTopColor: '#1a1a1a',
     backgroundColor: '#0a0a0a',
   },
-  cookNavMic: {
-    width: 46,
-    height: 46,
-    borderRadius: 12,
-    backgroundColor: 'rgba(255,255,255,0.06)',
-    borderWidth: 0.5,
-    borderColor: '#2a2a2a',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  cookNavMicText: { fontSize: 20 },
   cookNavBack: {
     flex: 1,
     paddingVertical: 14,
