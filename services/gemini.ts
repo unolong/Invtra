@@ -99,3 +99,44 @@ export const callGeminiWithImage = async (
   const data = await response.json();
   return data.candidates[0].content.parts[0].text;
 };
+
+// Audio file upload + transcription call via Gemini File API
+export const callGeminiWithAudio = async (uri: string, prompt: string): Promise<string> => {
+  if (Platform.OS === 'web') throw new Error('Audio-Analyse nicht auf Web verfügbar');
+  const FileSystem = await import('expo-file-system/legacy');
+  const mimeType = uri.toLowerCase().endsWith('.3gp') ? 'audio/3gpp' : 'audio/mp4';
+
+  const upload = await FileSystem.uploadAsync(
+    `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=media&key=${GEMINI_KEY}`,
+    uri,
+    {
+      httpMethod: 'POST',
+      uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+      headers: {
+        'X-Goog-Upload-Protocol': 'raw',
+        'X-Goog-Upload-Header-Content-Type': mimeType,
+        'Content-Type': mimeType,
+      },
+    },
+  );
+  if (upload.status !== 200) throw new Error(`Audio-Upload fehlgeschlagen: HTTP ${upload.status}`);
+  const { file } = JSON.parse(upload.body);
+
+  const audioResp = await fetch(`${GEMINI_URL}?key=${GEMINI_KEY}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [{ parts: [
+        { file_data: { mime_type: mimeType, file_uri: file.uri } },
+        { text: prompt },
+      ]}],
+      generationConfig: GENERATION_CONFIG,
+    }),
+  });
+  if (!audioResp.ok) {
+    const err = await audioResp.json().catch(() => ({}));
+    throw new Error(err?.error?.message ?? `HTTP ${audioResp.status}`);
+  }
+  const audioData = await audioResp.json();
+  return audioData.candidates[0].content.parts[0].text;
+};

@@ -1,3 +1,4 @@
+import { Audio } from 'expo-av';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -17,6 +18,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { analyzeVoiceMeal, type DishComponent } from '@/services/anthropic';
+import { voiceResult } from '@/lib/voice-result';
 import InventoryDeductModal from '@/components/ui/InventoryDeductModal';
 import { useFoodLog } from '@/context/food-log-context';
 import { useInventory } from '@/context/inventory-context';
@@ -159,6 +162,10 @@ export default function LogFoodScreen() {
   const [addCount, setAddCount] = useState(0);
   const [inventoryMatches, setInventoryMatches] = useState<InventoryMatch[]>([]);
   const [showDeductModal, setShowDeductModal] = useState(false);
+  const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'processing'>('idle');
+  const recordingRef = useRef<Audio.Recording | null>(null);
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  const voiceStartTimeRef = useRef<number>(0);
   const { addEntry, entries } = useFoodLog();
   const { items: inventoryItems, updateItem, removeItem } = useInventory();
 
@@ -170,6 +177,83 @@ export default function LogFoodScreen() {
   useEffect(() => {
     getRecentMeals().then(setRecentMeals);
   }, []);
+
+  useEffect(() => {
+    if (voiceState === 'recording') {
+      const loop = Animated.loop(
+        Animated.sequence([
+          Animated.timing(pulseAnim, { toValue: 1.5, duration: 500, useNativeDriver: true }),
+          Animated.timing(pulseAnim, { toValue: 1, duration: 500, useNativeDriver: true }),
+        ]),
+      );
+      loop.start();
+      return () => loop.stop();
+    } else {
+      pulseAnim.setValue(1);
+    }
+  }, [voiceState, pulseAnim]);
+
+  const handleVoicePress = useCallback(async () => {
+    if (voiceState === 'recording') {
+      const rec = recordingRef.current;
+      if (!rec) return;
+
+      // Measure A: min 2 seconds
+      if (Date.now() - voiceStartTimeRef.current < 2000) {
+        await rec.stopAndUnloadAsync().catch(() => {});
+        recordingRef.current = null;
+        setVoiceState('idle');
+        Alert.alert('Zu kurze Aufnahme', 'Halte den Button gedrückt und sprich deutlich.');
+        return;
+      }
+
+      setVoiceState('processing');
+      try {
+        await rec.stopAndUnloadAsync();
+        const uri = rec.getURI();
+        recordingRef.current = null;
+        if (!uri) { setVoiceState('idle'); return; }
+
+        const result = await analyzeVoiceMeal(uri);
+        const enriched: DishComponent[] = result.components.map(c => {
+          const hits = searchBls(c.name, { limit: 1 });
+          if (hits.length > 0) {
+            const bls = hits[0];
+            return {
+              name: c.name, amount: c.amount, unit: c.unit,
+              caloriesPer100: bls.pro100g.kalorien,
+              proteinPer100: bls.pro100g.protein,
+              carbsPer100: bls.pro100g.kohlenhydrate,
+              fatPer100: bls.pro100g.fett,
+              isHiddenFat: false,
+            };
+          }
+          return { name: c.name, amount: c.amount, unit: c.unit, caloriesPer100: 0, proteinPer100: 0, carbsPer100: 0, fatPer100: 0, isHiddenFat: false };
+        });
+
+        voiceResult.set({ dishName: result.mealDescription, components: enriched });
+        router.push({ pathname: '/ai-result', params: { meal: result.mealType, fromVoice: '1' } });
+      } catch (e: any) {
+        const msg = e?.message === 'Nichts erkannt'
+          ? 'Sprich deutlich und nenne ein Gericht oder Lebensmittel.'
+          : 'Spracheingabe konnte nicht verarbeitet werden.';
+        Alert.alert('Nichts erkannt', msg);
+      } finally {
+        setVoiceState('idle');
+      }
+    } else if (voiceState === 'idle') {
+      const perm = await Audio.requestPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Mikrofon-Zugriff', 'Bitte Mikrofon-Zugriff in den Einstellungen erlauben.');
+        return;
+      }
+      await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
+      const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
+      recordingRef.current = recording;
+      voiceStartTimeRef.current = Date.now();
+      setVoiceState('recording');
+    }
+  }, [voiceState, pulseAnim]);
 
   // Debounced live search — fires 180ms after the last keystroke
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -348,12 +432,21 @@ export default function LogFoodScreen() {
                 <Text style={styles.smallCardLabel}>Barcode</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={styles.smallCard}
-                onPress={() => Alert.alert('Spracheingabe', 'Kommt bald!')}
+                style={[styles.smallCard, voiceState === 'recording' && styles.smallCardRecording]}
+                onPress={handleVoicePress}
                 activeOpacity={0.8}
+                disabled={voiceState === 'processing'}
               >
-                <Text style={{ fontSize: 20 }}>🎙</Text>
-                <Text style={styles.smallCardLabel}>Sprache</Text>
+                {voiceState === 'processing' ? (
+                  <ActivityIndicator size="small" color={ACCENT} />
+                ) : voiceState === 'recording' ? (
+                  <Animated.View style={[styles.voiceDot, { transform: [{ scale: pulseAnim }] }]} />
+                ) : (
+                  <Text style={{ fontSize: 20 }}>🎙</Text>
+                )}
+                <Text style={[styles.smallCardLabel, voiceState === 'recording' && { color: '#F74F4F' }]}>
+                  {voiceState === 'recording' ? 'Stopp' : voiceState === 'processing' ? 'Analyse…' : 'Sprache'}
+                </Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -569,6 +662,8 @@ function ScannerView({
   onBarcode: (e: { data: string }) => void;
   onClose: () => void;
 }) {
+  const [torch, setTorch] = useState(false);
+
   if (!permission?.granted) {
     return (
       <SafeAreaView style={[styles.safe, { alignItems: 'center', justifyContent: 'center', gap: 16 }]}>
@@ -591,6 +686,7 @@ function ScannerView({
         style={StyleSheet.absoluteFill}
         barcodeScannerSettings={{ barcodeTypes: ['ean13', 'ean8', 'upc_a', 'upc_e', 'code128', 'code39'] }}
         onBarcodeScanned={onBarcode}
+        enableTorch={torch}
       />
       <View style={styles.scanOverlay}>
         <View style={styles.scanFrame} />
@@ -599,6 +695,15 @@ function ScannerView({
           <Text style={styles.scanCancelText}>Abbrechen</Text>
         </TouchableOpacity>
       </View>
+      {/* Torch button — top-right corner */}
+      <TouchableOpacity
+        style={styles.scanTorchBtn}
+        onPress={() => setTorch(t => !t)}
+        activeOpacity={0.75}
+        hitSlop={8}
+      >
+        <Text style={[styles.scanTorchIcon, torch && styles.scanTorchIconOn]}>⚡</Text>
+      </TouchableOpacity>
       {loading && (
         <View style={styles.scanLoadingOverlay}>
           <ActivityIndicator size="large" color={ACCENT} />
@@ -1228,6 +1333,17 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
   },
+  scanTorchBtn: {
+    position: 'absolute',
+    bottom: 40,
+    right: 24,
+    zIndex: 10,
+    backgroundColor: '#222222',
+    borderRadius: 12,
+    padding: 12,
+  },
+  scanTorchIcon:   { fontSize: 20, color: '#666666' },
+  scanTorchIconOn: { color: ACCENT },
   scanLoadingOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0,0,0,0.7)',
@@ -1467,5 +1583,15 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
     letterSpacing: -0.3,
+  },
+  smallCardRecording: {
+    borderColor: 'rgba(247,79,79,0.4)',
+    backgroundColor: 'rgba(247,79,79,0.08)',
+  },
+  voiceDot: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#F74F4F',
   },
 });

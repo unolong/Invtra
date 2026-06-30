@@ -1,4 +1,4 @@
-import DateTimePicker from '@react-native-community/datetimepicker';
+import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
 import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -119,7 +119,7 @@ export default function ItemDetailSheet({
     setAiLoading(true);
     setAiDays(null);
     setAiWarning(undefined);
-    estimateShelfLife(productName, location)
+    estimateShelfLife(productName, location, null)
       .then(r => {
         if (fetchRef.current !== id) return;
         setAiDays(r.days);
@@ -268,13 +268,31 @@ export default function ItemDetailSheet({
                   <View style={s.manualSection}>
                     <TouchableOpacity
                       style={s.dateField}
-                      onPress={() => setShowPicker(v => !v)}
+                      onPress={() => {
+                        if (Platform.OS === 'android') {
+                          DateTimePickerAndroid.open({
+                            value: draftDate ? new Date(draftDate) : new Date(),
+                            mode: 'date',
+                            onChange: (event, date) => {
+                              if (event.type === 'set' && date) {
+                                const d = new Date(date);
+                                d.setHours(0, 0, 0, 0);
+                                setDraftDate(d.toISOString());
+                              }
+                            },
+                          });
+                        } else {
+                          setShowPicker(v => !v);
+                        }
+                      }}
                       activeOpacity={0.8}
                     >
                       <Text style={{ fontSize: 16 }}>📅</Text>
                       <Text style={s.dateText}>{formatDate(draftDate)}</Text>
                       <View style={{ flex: 1 }} />
-                      <Text style={s.dateChevron}>{showDatePicker ? '▲' : '▼'}</Text>
+                      <Text style={s.dateChevron}>
+                        {Platform.OS === 'android' ? '›' : showDatePicker ? '▲' : '▼'}
+                      </Text>
                     </TouchableOpacity>
 
                     {showDatePicker && Platform.OS === 'ios' && (
@@ -294,21 +312,6 @@ export default function ItemDetailSheet({
                           style={{ height: 320, backgroundColor: '#111111' }}
                         />
                       </View>
-                    )}
-                    {showDatePicker && Platform.OS === 'android' && (
-                      <DateTimePicker
-                        value={draftDate ? new Date(draftDate) : new Date()}
-                        mode="date"
-                        display="default"
-                        onChange={(event, date) => {
-                          setShowPicker(false);
-                          if (event.type === 'set' && date) {
-                            const d = new Date(date);
-                            d.setHours(0, 0, 0, 0);
-                            setDraftDate(d.toISOString());
-                          }
-                        }}
-                      />
                     )}
 
                     <View style={s.chipRow}>

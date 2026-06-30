@@ -10,6 +10,7 @@ import {
   Modal,
   Platform,
   ScrollView,
+  StatusBar,
   StyleSheet,
   Text,
   TextInput,
@@ -20,7 +21,7 @@ import { PinchGestureHandler, State } from 'react-native-gesture-handler';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Line } from 'react-native-svg';
 
-import { useInventory } from '@/context/inventory-context';
+import { type InventoryLocation, useInventory } from '@/context/inventory-context';
 import { capturedPhoto } from '@/lib/captured-photo';
 import { fetchProductByBarcode } from '@/services/open-food-facts';
 import {
@@ -28,6 +29,7 @@ import {
   estimateShelfLife,
   type InventoryPhotoItem,
 } from '@/services/anthropic';
+import { lookupShelfLife } from '@/constants/shelfLife';
 
 const ACCENT = '#c8ff00';
 
@@ -49,6 +51,8 @@ const EXPIRY_CHIPS = [
   { label: '1M',  days: 30 },
 ] as const;
 
+const LOCATIONS: InventoryLocation[] = ['Kühlschrank', 'Vorrat', 'Tiefkühler'];
+
 const EDIT_UNITS = ['g', 'kg', 'ml', 'L', 'Stück'] as const;
 type EditUnit = typeof EDIT_UNITS[number];
 
@@ -60,6 +64,8 @@ type CheckedItem = InventoryPhotoItem & {
   checked: boolean;
   editedQuantity?: number;
   editedUnit?: EditUnit;
+  editedLocation?: InventoryLocation;
+  editedOpened?: boolean | null;
   manuallyEdited?: boolean;
   expiresAt?: string | null;
   isManual?: boolean;
@@ -109,11 +115,15 @@ function groupTagsByProximity(items: CheckedItem[], threshold = 8): TagGroup[] {
     const rawCx = group.reduce((s, gi) => s + gi.boundingBox!.x + gi.boundingBox!.width / 2, 0) / group.length;
     const rawCy = group.reduce((s, gi) => s + gi.boundingBox!.y + gi.boundingBox!.height / 2, 0) / group.length;
 
+    // Single items: anchor tag at bounding box top-left. Groups: use center.
+    const displayX = group.length === 1 ? item.boundingBox!.x : rawCx;
+    const displayY = group.length === 1 ? item.boundingBox!.y : rawCy;
+
     groups.push({
       id: item.id,
       items: group,
-      cx: Math.max(3, Math.min(74, rawCx)),
-      cy: Math.max(3, Math.min(87, rawCy)),
+      cx: Math.max(3, Math.min(85, displayX)),
+      cy: Math.max(3, Math.min(90, displayY)),
       rawCx,
       rawCy,
     });
@@ -186,6 +196,12 @@ export default function AiInventoryScreen() {
   const [editDraftDate, setEditDraftDate]     = useState<string | null>(null);
   const [editShowPicker, setEditPicker]       = useState(false);
   const [editName, setEditName]               = useState('');
+  const [editLocation, setEditLocation]       = useState<InventoryLocation>('Kühlschrank');
+  const [editOpened, setEditOpened]           = useState<boolean | null>(null);
+  const [editAiWarning, setEditAiWarning]       = useState<string | null>(null);
+  const [editAiIdealStorage, setEditAiIdealStorage] = useState<string | null>(null);
+  const [shelfLifeCache, setShelfLifeCache]   = useState<Record<string, { days: number; date: string; warning?: string; idealStorage?: string; category?: string }>>({});
+  const [categoryCache, setCategoryCache]     = useState<Record<string, { category: string; idealStorage: string }>>({});
   const fetchRef = useRef(0);
 
   const tagGroups = useMemo(() => groupTagsByProximity(items), [items]);
@@ -216,26 +232,84 @@ export default function AiInventoryScreen() {
 
   useEffect(() => { analyze(); }, []);
 
-  // AI shelf life estimate when editing
+  // AI shelf life estimate — cache key: `${itemName}_${location}_${opened}`
   useEffect(() => {
     if (!editingId || editExpiryMode !== 'ai') return;
     const item = items.find(i => i.id === editingId);
     if (!item) return;
+
+    const cacheKey = `${item.name}_${editLocation}_${editOpened}`;
+
+    // Full cache hit
+    const cached = shelfLifeCache[cacheKey];
+    if (cached) {
+      setEditAiDays(cached.days);
+      setEditAiWarning(cached.warning ?? null);
+      setEditAiIdealStorage(cached.idealStorage ?? null);
+      return;
+    }
+
+    // Category known → instant local lookup, no API call
+    const knownCat = categoryCache[item.name];
+    if (knownCat) {
+      const { days, unsuitable } = lookupShelfLife(knownCat.category, editLocation, editOpened);
+      const warning = unsuitable ? `Nicht zur Lagerung im ${editLocation} geeignet.` : undefined;
+      setEditAiDays(days);
+      setEditAiWarning(warning ?? null);
+      setEditAiIdealStorage(knownCat.idealStorage);
+      setShelfLifeCache(prev => ({
+        ...prev,
+        [cacheKey]: { days, date: days > 0 ? makeExpiresAt(days) : '', warning, idealStorage: knownCat.idealStorage, category: knownCat.category },
+      }));
+      return;
+    }
+
     const id = ++fetchRef.current;
     setEditAiLoading(true);
     setEditAiDays(null);
-    estimateShelfLife(item.name, 'Kühlschrank')
+    setEditAiWarning(null);
+    setEditAiIdealStorage(null);
+    estimateShelfLife(item.name, editLocation, editOpened)
       .then(r => {
         if (fetchRef.current !== id) return;
         setEditAiDays(r.days);
+        setEditAiWarning(r.warning ?? null);
+        setEditAiIdealStorage(r.idealStorage ?? null);
+        if (r.category && r.idealStorage) {
+          setCategoryCache(prev => ({ ...prev, [item.name]: { category: r.category!, idealStorage: r.idealStorage! } }));
+        }
+        setShelfLifeCache(prev => ({
+          ...prev,
+          [cacheKey]: { days: r.days, date: r.days > 0 ? makeExpiresAt(r.days) : '', warning: r.warning, idealStorage: r.idealStorage, category: r.category },
+        }));
         setEditAiLoading(false);
       })
       .catch(() => {
         if (fetchRef.current !== id) return;
-        setEditAiDays(5);
+        const fallbackDays = editLocation === 'Tiefkühler' ? 180 : editLocation === 'Vorrat' ? 30 : 7;
+        setEditAiDays(fallbackDays);
+        setEditAiWarning(null);
+        setEditAiIdealStorage(null);
+        setShelfLifeCache(prev => ({ ...prev, [cacheKey]: { days: fallbackDays, date: makeExpiresAt(fallbackDays) } }));
         setEditAiLoading(false);
       });
-  }, [editingId, editExpiryMode]);
+  }, [editingId, editExpiryMode, editLocation, editOpened]);
+
+  // Sync expiresAt live to items whenever AI days or manual date change
+  useEffect(() => {
+    if (!editingId) return;
+    if (editExpiryMode === 'ai') {
+      if (editAiDays == null) return;
+      setItems(prev => prev.map(i =>
+        i.id === editingId ? { ...i, expiresAt: makeExpiresAt(editAiDays) } : i,
+      ));
+    } else if (editExpiryMode === 'manual') {
+      if (editDraftDate == null) return;
+      setItems(prev => prev.map(i =>
+        i.id === editingId ? { ...i, expiresAt: editDraftDate } : i,
+      ));
+    }
+  }, [editingId, editExpiryMode, editAiDays, editDraftDate]);
 
   const openEdit = (item: CheckedItem) => {
     if (editingId === item.id) { setEditingId(null); return; }
@@ -243,8 +317,12 @@ export default function AiInventoryScreen() {
     setEditName(item.name);
     setEditQuantityStr(String(item.editedQuantity ?? item.quantity));
     setEditUnit((item.editedUnit ?? item.unit) as EditUnit);
+    setEditLocation(item.editedLocation ?? item.idealStorage ?? 'Kühlschrank');
+    setEditOpened(item.editedOpened !== undefined ? item.editedOpened : (item.opened ?? null));
     setEditMode('ai');
     setEditAiDays(null);
+    setEditAiWarning(null);
+    setEditAiIdealStorage(null);
     setEditDraftDate(null);
     setEditPicker(false);
   };
@@ -269,15 +347,12 @@ export default function AiInventoryScreen() {
 
   const confirmEdit = () => {
     if (!editingId) return;
-    const newQty = Math.max(1, Math.round(Number(editQuantityStr) || 1));
-    let expiresAt: string | null = null;
-    if (editExpiryMode === 'ai' && editAiDays) expiresAt = makeExpiresAt(editAiDays);
-    else if (editExpiryMode === 'manual' && editDraftDate) expiresAt = editDraftDate;
-    setItems(prev => prev.map(i =>
-      i.id === editingId
-        ? { ...i, name: editName.trim() || i.name, editedQuantity: newQty, editedUnit: editUnit, manuallyEdited: true, expiresAt }
-        : i,
-    ));
+    // All fields already written live; only name needs commit here (avoids rewriting on every keystroke)
+    if (editName.trim()) {
+      setItems(prev => prev.map(i =>
+        i.id === editingId ? { ...i, name: editName.trim(), manuallyEdited: true } : i,
+      ));
+    }
     setEditingId(null);
   };
 
@@ -345,7 +420,7 @@ export default function AiInventoryScreen() {
           name: i.name,
           qty: formatQty(i),
           cat: i.category,
-          location: 'Kühlschrank' as const,
+          location: i.editedLocation ?? i.idealStorage ?? 'Kühlschrank',
           expiresAt: i.expiresAt ?? null,
         })),
       );
@@ -371,6 +446,7 @@ export default function AiInventoryScreen() {
 
       {/* Photo */}
       {!!photo.uri && !photo.uri.startsWith('barcode:') && (
+        <>
         <View style={styles.photoWrapper}>
           <Image source={{ uri: photo.uri }} style={styles.photo} resizeMode="contain" />
 
@@ -470,11 +546,19 @@ export default function AiInventoryScreen() {
             </>
           )}
         </View>
+        {!loading && (
+          <Text style={styles.positionHint}>Positionen sind Schätzungen</Text>
+        )}
+        </>
       )}
 
       {/* Fullscreen photo modal */}
       {fullscreenOpen && !!photo.uri && (
-        <FullscreenPhotoModal uri={photo.uri} onClose={() => setFullscreenOpen(false)} />
+        <FullscreenPhotoModal
+          uri={photo.uri}
+          tagGroups={tagGroups}
+          onClose={() => setFullscreenOpen(false)}
+        />
       )}
 
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
@@ -526,16 +610,13 @@ export default function AiInventoryScreen() {
                         </Text>
                         <Text style={styles.itemSub} numberOfLines={1}>
                           {formatQty(item)}
-                          {' · '}
-                          {item.isManual
-                            ? <Text style={{ color: ACCENT }}>✎ manuell</Text>
-                            : item.manuallyEdited
-                              ? <Text style={{ color: 'rgba(255,255,255,0.5)' }}>Manuell angepasst</Text>
-                              : <Text style={{ color: confColor(item.confidence) }}>
-                                  {Math.round(item.confidence * 100)}% sicher
-                                </Text>
-                          }
+                          {item.isManual && <Text style={{ color: ACCENT }}>{' · '}✎ manuell</Text>}
                         </Text>
+                        {!isEditing && !item.isManual && (
+                          <Text style={item.manuallyEdited ? styles.manuallyEditedHint : styles.estimateHint}>
+                            {item.manuallyEdited ? 'Manuell angepasst ✓' : 'KI-Schätzung · tippe zum Anpassen'}
+                          </Text>
+                        )}
                       </View>
 
                       <TouchableOpacity
@@ -556,6 +637,11 @@ export default function AiInventoryScreen() {
                             style={styles.nameEditInput}
                             value={editName}
                             onChangeText={setEditName}
+                            onBlur={() => {
+                              if (editingId && editName.trim()) {
+                                setItems(prev => prev.map(i => i.id === editingId ? { ...i, name: editName.trim(), manuallyEdited: true } : i));
+                              }
+                            }}
                             returnKeyType="done"
                             autoCorrect={false}
                             selectTextOnFocus
@@ -575,6 +661,7 @@ export default function AiInventoryScreen() {
                                 const cur = Number(editQuantityStr) || 0;
                                 const next = Math.max(0, cur - stepSize(editUnit));
                                 setEditQuantityStr(fmtQtyStr(next, editUnit));
+                                setItems(prev => prev.map(i => i.id === editingId ? { ...i, editedQuantity: next, editedUnit: editUnit, manuallyEdited: true } : i));
                               }}
                               disabled={(Number(editQuantityStr) || 0) <= 0}
                               hitSlop={4}
@@ -585,7 +672,13 @@ export default function AiInventoryScreen() {
                             <TextInput
                               style={styles.stepInput}
                               value={editQuantityStr}
-                              onChangeText={setEditQuantityStr}
+                              onChangeText={str => {
+                                setEditQuantityStr(str);
+                                const num = Math.max(1, Math.round(Number(str) || 1));
+                                if (!isNaN(Number(str)) && Number(str) > 0) {
+                                  setItems(prev => prev.map(i => i.id === editingId ? { ...i, editedQuantity: num, editedUnit: editUnit, manuallyEdited: true } : i));
+                                }
+                              }}
                               keyboardType="numeric"
                               returnKeyType="done"
                               selectTextOnFocus
@@ -597,6 +690,7 @@ export default function AiInventoryScreen() {
                                 const cur = Number(editQuantityStr) || 0;
                                 const next = cur + stepSize(editUnit);
                                 setEditQuantityStr(fmtQtyStr(next, editUnit));
+                                setItems(prev => prev.map(i => i.id === editingId ? { ...i, editedQuantity: next, editedUnit: editUnit, manuallyEdited: true } : i));
                               }}
                               hitSlop={4}
                             >
@@ -608,7 +702,10 @@ export default function AiInventoryScreen() {
                               <TouchableOpacity
                                 key={u}
                                 style={[styles.unitChip, editUnit === u && styles.unitChipActive]}
-                                onPress={() => setEditUnit(u)}
+                                onPress={() => {
+                                  setEditUnit(u);
+                                  setItems(prev => prev.map(i => i.id === editingId ? { ...i, editedUnit: u, manuallyEdited: true } : i));
+                                }}
                                 activeOpacity={0.75}
                               >
                                 <Text style={[styles.unitChipText, editUnit === u && styles.unitChipTextActive]}>
@@ -620,6 +717,59 @@ export default function AiInventoryScreen() {
                           {!item.isManual && item.originalDescription ? (
                             <Text style={styles.originalDesc}>Erkannt: {item.originalDescription}</Text>
                           ) : null}
+                        </View>
+
+                        {/* Location */}
+                        <View style={styles.editField}>
+                          <Text style={styles.editFieldLabel}>LAGERORT</Text>
+                          <View style={styles.locationBtnRow}>
+                            {LOCATIONS.map(loc => (
+                              <TouchableOpacity
+                                key={loc}
+                                style={[styles.locationBtn, editLocation === loc && styles.locationBtnActive]}
+                                onPress={() => {
+                                  if (loc === editLocation) return;
+                                  setEditLocation(loc);
+                                  if (editExpiryMode === 'ai') setEditAiDays(null);
+                                  setItems(prev => prev.map(i => i.id === editingId ? { ...i, editedLocation: loc, manuallyEdited: true } : i));
+                                }}
+                                activeOpacity={0.75}
+                              >
+                                <Text style={[styles.locationBtnText, editLocation === loc && styles.locationBtnTextActive]}>
+                                  {loc}
+                                </Text>
+                              </TouchableOpacity>
+                            ))}
+                          </View>
+                        </View>
+
+                        {/* Zustand */}
+                        <View style={styles.editField}>
+                          <Text style={styles.editFieldLabel}>ZUSTAND</Text>
+                          <View style={styles.locationBtnRow}>
+                            {([false, true] as const).map(o => {
+                              const isActive = o ? editOpened === true : editOpened !== true;
+                              return (
+                                <TouchableOpacity
+                                  key={String(o)}
+                                  style={[styles.locationBtn, isActive && styles.locationBtnActive]}
+                                  onPress={() => {
+                                    setEditOpened(o);
+                                    if (editExpiryMode === 'ai') setEditAiDays(null);
+                                    setItems(prev => prev.map(i => i.id === editingId ? { ...i, editedOpened: o, manuallyEdited: true } : i));
+                                  }}
+                                  activeOpacity={0.75}
+                                >
+                                  <Text style={[styles.locationBtnText, isActive && styles.locationBtnTextActive]}>
+                                    {o ? 'Geöffnet' : 'Ungeöffnet'}
+                                  </Text>
+                                </TouchableOpacity>
+                              );
+                            })}
+                          </View>
+                          {item.opened === null && !item.isManual && (
+                            <Text style={styles.zustandHint}>Nicht erkannt · Standard: Ungeöffnet</Text>
+                          )}
                         </View>
 
                         {/* Expiry */}
@@ -641,22 +791,32 @@ export default function AiInventoryScreen() {
                           </View>
 
                           {editExpiryMode === 'ai' && (
-                            <View style={styles.aiCard}>
+                            <View style={[styles.aiCard, editAiWarning != null && styles.aiCardWarn]}>
                               {editAiLoading ? (
                                 <View style={styles.aiLoadRow}>
                                   <ActivityIndicator size="small" color={ACCENT} />
-                                  <Text style={styles.aiLoadText}>Wird geschätzt…</Text>
+                                  <Text style={styles.aiLoadText}>Richtwert wird ermittelt…</Text>
                                 </View>
+                              ) : editAiWarning ? (
+                                <>
+                                  <Text style={styles.aiLabelWarn}>⚠ Ungeeigneter Lagerort</Text>
+                                  <Text style={styles.aiWarningText}>Nicht zur Lagerung hier geeignet.</Text>
+                                  {editAiIdealStorage && (
+                                    <Text style={styles.aiIdealStorageText}>Empfehlung: {editAiIdealStorage}</Text>
+                                  )}
+                                </>
                               ) : (
                                 <>
-                                  <View style={styles.aiTopRow}>
-                                    <Text style={styles.aiLabel}>✦ KI-Schätzung · Kühlschrank</Text>
-                                    {editAiDays != null && (
-                                      <Text style={styles.aiUntil}>bis {formatDate(makeExpiresAt(editAiDays))}</Text>
-                                    )}
-                                  </View>
-                                  {editAiDays != null && (
-                                    <Text style={styles.aiDays}>~{editAiDays} Tage</Text>
+                                  <Text style={styles.aiLabel} numberOfLines={1} ellipsizeMode="tail">
+                                    ✦ Richtwert · {editLocation}
+                                  </Text>
+                                  {editAiDays != null && editAiDays > 0 && (
+                                    <View style={styles.aiBottomRow}>
+                                      <Text style={styles.aiUntil} numberOfLines={1}>
+                                        bis {formatDate(makeExpiresAt(editAiDays))}
+                                      </Text>
+                                      <Text style={styles.aiDays}>~{editAiDays} Tage</Text>
+                                    </View>
                                   )}
                                 </>
                               )}
@@ -733,7 +893,7 @@ export default function AiInventoryScreen() {
                         </View>
 
                         <TouchableOpacity style={styles.confirmBtn} onPress={confirmEdit} activeOpacity={0.85}>
-                          <Text style={styles.confirmBtnText}>✓ Übernehmen</Text>
+                          <Text style={styles.confirmBtnText}>Fertig</Text>
                         </TouchableOpacity>
 
                         {idx < items.length - 1 && <View style={styles.itemRowBorder} />}
@@ -922,7 +1082,15 @@ export default function AiInventoryScreen() {
 
 // ─── Fullscreen Photo Modal ────────────────────────────────────
 
-function FullscreenPhotoModal({ uri, onClose }: { uri: string; onClose: () => void }) {
+function FullscreenPhotoModal({
+  uri,
+  tagGroups,
+  onClose,
+}: {
+  uri: string;
+  tagGroups: TagGroup[];
+  onClose: () => void;
+}) {
   const pinchScale = useRef(new Animated.Value(1)).current;
   const baseScale  = useRef(new Animated.Value(1)).current;
   const lastScale  = useRef(1);
@@ -943,7 +1111,14 @@ function FullscreenPhotoModal({ uri, onClose }: { uri: string; onClose: () => vo
   };
 
   return (
-    <Modal visible animationType="fade" statusBarTranslucent transparent={false}>
+    <Modal
+      visible
+      animationType="slide"
+      statusBarTranslucent
+      transparent={false}
+      onRequestClose={onClose}
+    >
+      <StatusBar hidden />
       <View style={fsStyles.container}>
         <PinchGestureHandler
           onGestureEvent={onPinchGesture}
@@ -954,6 +1129,38 @@ function FullscreenPhotoModal({ uri, onClose }: { uri: string; onClose: () => vo
           </Animated.View>
         </PinchGestureHandler>
 
+        {/* Tag overlays at bounding box positions */}
+        <View style={StyleSheet.absoluteFill} pointerEvents="none">
+          {tagGroups.map(group => {
+            const isGroup = group.items.length > 1;
+            const color = isGroup
+              ? '#2a2a2a'
+              : (CAT_COLOR[group.items[0].category] ?? ACCENT);
+            return (
+              <View
+                key={group.id}
+                style={[
+                  styles.segLabel,
+                  {
+                    top: `${group.cy}%`,
+                    left: `${group.cx}%`,
+                    backgroundColor: color,
+                  } as any,
+                ]}
+              >
+                <Text
+                  style={[styles.segLabelText, { color: isGroup ? '#f0f0f0' : '#000' }]}
+                  numberOfLines={1}
+                >
+                  {isGroup
+                    ? `${group.items.length} Produkte`
+                    : group.items[0].name}
+                </Text>
+              </View>
+            );
+          })}
+        </View>
+
         <SafeAreaView style={fsStyles.topBar} edges={['top']}>
           <TouchableOpacity style={fsStyles.closeBtn} onPress={onClose} hitSlop={12}>
             <Text style={fsStyles.closeBtnText}>✕</Text>
@@ -962,6 +1169,7 @@ function FullscreenPhotoModal({ uri, onClose }: { uri: string; onClose: () => vo
 
         <View style={fsStyles.hintBar}>
           <Text style={fsStyles.hintText}>Zusammenkneifen zum Zoomen</Text>
+          <Text style={fsStyles.positionHintText}>Positionen sind Schätzungen</Text>
         </View>
       </View>
     </Modal>
@@ -979,9 +1187,10 @@ const fsStyles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.55)', borderWidth: 0.5, borderColor: 'rgba(255,255,255,0.2)',
     alignItems: 'center', justifyContent: 'center',
   },
-  closeBtnText: { fontSize: 16, color: '#fff', fontWeight: '700' },
-  hintBar: { position: 'absolute', bottom: 32, left: 0, right: 0, alignItems: 'center' },
+  closeBtnText: { fontSize: 16, color: '#f0f0f0', fontWeight: '700' },
+  hintBar: { position: 'absolute', bottom: 32, left: 0, right: 0, alignItems: 'center', gap: 4 },
   hintText: { fontSize: 12, color: 'rgba(255,255,255,0.35)', fontWeight: '500' },
+  positionHintText: { fontSize: 11, color: '#666666' },
 });
 
 // ─── Styles ───────────────────────────────────────────────────
@@ -1094,6 +1303,9 @@ const styles = StyleSheet.create({
   unitChipText: { fontSize: 12, fontWeight: '600', color: 'rgba(255,255,255,0.4)' },
   unitChipTextActive: { color: ACCENT },
   originalDesc: { fontSize: 11, color: '#666666', marginTop: 2 },
+  estimateHint: { fontSize: 11, color: '#666666', marginTop: 1 },
+  manuallyEditedHint: { fontSize: 11, color: '#26de81', marginTop: 1 },
+  positionHint: { fontSize: 11, color: '#666666', textAlign: 'center', paddingVertical: 4 },
 
   stepperRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   stepBtn: {
@@ -1119,14 +1331,19 @@ const styles = StyleSheet.create({
 
   aiCard: {
     backgroundColor: 'rgba(200,255,0,0.04)',
-    borderRadius: 12, borderWidth: 0.5, borderColor: 'rgba(200,255,0,0.12)', padding: 14, gap: 4,
+    borderRadius: 12, borderWidth: 0.5, borderColor: 'rgba(200,255,0,0.12)',
+    padding: 14, gap: 4, width: '100%', overflow: 'hidden',
   },
   aiLoadRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 4 },
   aiLoadText: { fontSize: 13, color: 'rgba(255,255,255,0.5)' },
-  aiTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
-  aiLabel: { fontSize: 10, fontWeight: '700', color: ACCENT, letterSpacing: 1, textTransform: 'uppercase' },
-  aiUntil: { fontSize: 11, color: 'rgba(255,255,255,0.3)' },
-  aiDays: { fontSize: 26, fontWeight: '800', color: '#fff', letterSpacing: -1, lineHeight: 30 },
+  aiCardWarn: { backgroundColor: 'rgba(247,79,79,0.07)', borderColor: 'rgba(247,79,79,0.25)' },
+  aiLabel: { fontSize: 10, fontWeight: '700', color: ACCENT, letterSpacing: 1, textTransform: 'uppercase', flexShrink: 1 },
+  aiLabelWarn: { fontSize: 10, fontWeight: '700', color: '#F74F4F', letterSpacing: 1, textTransform: 'uppercase' },
+  aiWarningText: { fontSize: 12, color: '#F74F4F', lineHeight: 18, fontWeight: '500' },
+  aiIdealStorageText: { fontSize: 11, color: 'rgba(255,255,255,0.5)', marginTop: 4, fontWeight: '500' },
+  aiBottomRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'baseline', width: '100%' },
+  aiUntil: { fontSize: 11, color: 'rgba(255,255,255,0.3)', flexShrink: 1 },
+  aiDays: { fontSize: 26, fontWeight: '800', color: '#fff', letterSpacing: -1, lineHeight: 30, flexShrink: 0 },
 
   manualSection: { gap: 8 },
   dateField: {
@@ -1145,6 +1362,16 @@ const styles = StyleSheet.create({
   expiryChipActive: { backgroundColor: ACCENT, borderColor: ACCENT },
   expiryChipText: { fontSize: 12, fontWeight: '700', color: 'rgba(255,255,255,0.45)' },
   expiryChipTextActive: { color: '#000' },
+
+  zustandHint: { fontSize: 10, color: '#666666', marginTop: 2 },
+  locationBtnRow: { flexDirection: 'row', gap: 6 },
+  locationBtn: {
+    flex: 1, backgroundColor: '#222222', borderRadius: 8,
+    paddingVertical: 9, alignItems: 'center', justifyContent: 'center',
+  },
+  locationBtnActive: { backgroundColor: ACCENT },
+  locationBtnText: { fontSize: 11, fontWeight: '700', color: '#666666' },
+  locationBtnTextActive: { color: '#0a0a0a' },
 
   confirmBtn: { backgroundColor: ACCENT, borderRadius: 12, paddingVertical: 13, alignItems: 'center' },
   confirmBtnText: { color: '#000', fontSize: 14, fontWeight: '800', letterSpacing: -0.2 },

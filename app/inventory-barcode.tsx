@@ -23,6 +23,7 @@ export default function InventoryBarcodeScreen() {
   const [scanned, setScanned] = useState(false);
   const [loading, setLoading] = useState(false);
   const [product, setProduct] = useState<Product | null>(null);
+  const [torch, setTorch] = useState(false);
 
   const handleBarcode = useCallback(
     async ({ data }: { data: string }) => {
@@ -71,6 +72,7 @@ export default function InventoryBarcodeScreen() {
           barcodeTypes: ['ean13', 'ean8', 'upc_a', 'upc_e', 'code128', 'code39'],
         }}
         onBarcodeScanned={scanned ? undefined : handleBarcode}
+        enableTorch={torch}
       />
 
       <SafeAreaView style={s.topBar} edges={['top']}>
@@ -80,8 +82,17 @@ export default function InventoryBarcodeScreen() {
         <View style={s.badge}>
           <Text style={s.badgeText}>Inventar · Barcode</Text>
         </View>
-        <View style={{ width: 40 }} />
+        <View style={{ width: 44 }} />
       </SafeAreaView>
+
+      <TouchableOpacity
+        style={s.torchBtn}
+        onPress={() => setTorch(t => !t)}
+        activeOpacity={0.75}
+        hitSlop={8}
+      >
+        <Text style={[s.torchIcon, torch && s.torchIconOn]}>⚡</Text>
+      </TouchableOpacity>
 
       <View style={s.scanOverlay} pointerEvents="none">
         <View style={s.scanFrame} />
@@ -167,6 +178,14 @@ const s = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center', gap: 16,
   },
   loadingText: { color: '#fff', fontSize: 15, fontWeight: '500' },
+
+  torchBtn: {
+    position: 'absolute', bottom: 40, right: 24, zIndex: 10,
+    backgroundColor: '#222222', borderRadius: 12, padding: 12,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  torchIcon:    { fontSize: 20, color: '#666666' },
+  torchIconOn:  { color: ACCENT },
 
   accentBtn: {
     backgroundColor: ACCENT, borderRadius: 14,

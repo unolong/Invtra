@@ -1,4 +1,4 @@
-import DateTimePicker from '@react-native-community/datetimepicker';
+import DateTimePicker, { DateTimePickerAndroid } from '@react-native-community/datetimepicker';
 import { router } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import {
@@ -67,6 +67,23 @@ function daysFromToday(iso: string | null): number | null {
   return Math.round((target.getTime() - today.getTime()) / 86400000);
 }
 
+function openDatePickerAndroid(
+  current: string | null,
+  onSelect: (iso: string) => void,
+) {
+  DateTimePickerAndroid.open({
+    value: current ? new Date(current) : new Date(),
+    mode: 'date',
+    onChange: (event, date) => {
+      if (event.type === 'set' && date) {
+        const d = new Date(date);
+        d.setHours(0, 0, 0, 0);
+        onSelect(d.toISOString());
+      }
+    },
+  });
+}
+
 export default function AddInventoryItemScreen() {
   const { addItems } = useInventory();
 
@@ -96,7 +113,7 @@ export default function AddInventoryItemScreen() {
       setAiDays(null);
       setAiWarning(undefined);
       try {
-        const r = await estimateShelfLife(trimmed, location);
+        const r = await estimateShelfLife(trimmed, location, null);
         if (fetchRef.current !== id) return;
         setAiDays(r.days);
         setAiWarning(r.warning);
@@ -278,13 +295,21 @@ export default function AddInventoryItemScreen() {
               <View style={st.manualSection}>
                 <TouchableOpacity
                   style={st.dateField}
-                  onPress={() => setShowPicker(v => !v)}
+                  onPress={() => {
+                    if (Platform.OS === 'android') {
+                      openDatePickerAndroid(draftDate, setDraftDate);
+                    } else {
+                      setShowPicker(v => !v);
+                    }
+                  }}
                   activeOpacity={0.8}
                 >
                   <Text style={{ fontSize: 16 }}>📅</Text>
                   <Text style={st.dateText}>{formatDate(draftDate)}</Text>
                   <View style={{ flex: 1 }} />
-                  <Text style={st.dateChevron}>{showDatePicker ? '▲' : '▼'}</Text>
+                  <Text style={st.dateChevron}>
+                    {Platform.OS === 'android' ? '›' : showDatePicker ? '▲' : '▼'}
+                  </Text>
                 </TouchableOpacity>
 
                 {showDatePicker && Platform.OS === 'ios' && (
@@ -300,17 +325,6 @@ export default function AddInventoryItemScreen() {
                       style={{ height: 320, backgroundColor: '#111111' }}
                     />
                   </View>
-                )}
-                {showDatePicker && Platform.OS === 'android' && (
-                  <DateTimePicker
-                    value={draftDate ? new Date(draftDate) : new Date()}
-                    mode="date"
-                    display="default"
-                    onChange={(event, date) => {
-                      setShowPicker(false);
-                      if (event.type === 'set' && date) { const d = new Date(date); d.setHours(0,0,0,0); setDraftDate(d.toISOString()); }
-                    }}
-                  />
                 )}
 
                 <View style={st.chipRow}>

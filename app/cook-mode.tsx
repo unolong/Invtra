@@ -46,10 +46,25 @@ function getDefaultMeal(): Meal {
 }
 
 function extractTimerSeconds(step: string): number | null {
-  const m = step.match(/(\d+)\s*(?:Minuten?|Min\.)/i);
-  if (m) return parseInt(m[1], 10) * 60;
-  const s = step.match(/(\d+)\s*(?:Sekunden?|Sek\.)/i);
-  if (s) return parseInt(s[1], 10);
+  // Range minutes: "5-7 Minuten" → average
+  const rangeMin = step.match(/(\d+)\s*[-–]\s*(\d+)\s*(?:Minuten?|Min\.?|min)\b/i);
+  if (rangeMin) {
+    return Math.round((parseInt(rangeMin[1], 10) + parseInt(rangeMin[2], 10)) / 2) * 60;
+  }
+  // Range hours: "1-2 Stunden"
+  const rangeHour = step.match(/(\d+)\s*[-–]\s*(\d+)\s*(?:Stunden?|Std\.?)\b/i);
+  if (rangeHour) {
+    return Math.round((parseInt(rangeHour[1], 10) + parseInt(rangeHour[2], 10)) / 2) * 3600;
+  }
+  // Hours: "2 Stunden" / "2 Std."
+  const hours = step.match(/(\d+)\s*(?:Stunden?|Std\.?)\b/i);
+  if (hours) return parseInt(hours[1], 10) * 3600;
+  // Minutes: "X Minuten", "X Min.", "X min"
+  const mins = step.match(/(\d+)\s*(?:Minuten?|Min\.?|min)\b/i);
+  if (mins) return parseInt(mins[1], 10) * 60;
+  // Seconds
+  const secs = step.match(/(\d+)\s*(?:Sekunden?|Sek\.?)\b/i);
+  if (secs) return parseInt(secs[1], 10);
   return null;
 }
 
@@ -505,7 +520,7 @@ function CookingScreen({
             />
             <TouchableOpacity style={styles.timerBtn} onPress={onTimerToggle} activeOpacity={0.8}>
               <Text style={styles.timerBtnText}>
-                {timerLeft === 0 ? '↺ Neu starten' : timerRunning ? '⏸ Pause' : '▶ Start'}
+                {timerLeft === 0 ? '↺ NEUSTART' : timerRunning ? 'PAUSE' : 'START'}
               </Text>
             </TouchableOpacity>
           </View>
@@ -586,8 +601,8 @@ function CookingScreen({
 // ─── Circle Timer ─────────────────────────────────────────────
 
 function CircleTimer({ total, left, running }: { total: number; left: number; running: boolean }) {
-  const R = 52;
-  const STROKE = 5;
+  const R = 70;
+  const STROKE = 6;
   const SIZE = (R + STROKE) * 2;
   const circumference = 2 * Math.PI * R;
   const progress = total > 0 ? left / total : 0;
@@ -944,7 +959,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   timerTime: {
-    fontSize: 22,
+    fontSize: 30,
     fontWeight: '800',
     color: ACCENT,
     letterSpacing: -1,
